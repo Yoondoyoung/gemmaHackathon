@@ -4,7 +4,9 @@
 실행: python -m src.main [--video clips/x.mp4] [--no-florence] [--mute]
 """
 import argparse
+import json
 import os
+import pathlib
 import threading
 import time
 import warnings
@@ -22,6 +24,27 @@ from src.llm import gemma_client
 from src.scene_state import SceneState
 from src.vision import yolo_worker
 from src.vision.camera import Camera
+
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_FRAME_DUMP_DIR = _ROOT / config.GEMMA_FRAME_DUMP_DIR
+
+
+def _save_gemma_frame(question: str, scene_json: str) -> pathlib.Path:
+    """b 질문 시 Gemma에 전달된 장면 스냅샷을 번호 증가 파일로 저장."""
+    _FRAME_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for p in _FRAME_DUMP_DIR.glob("*.json"):
+        prefix = p.stem.split("_", 1)[0]
+        if prefix.isdigit():
+            n = max(n, int(prefix))
+    path = _FRAME_DUMP_DIR / f"{n + 1}_frame.json"
+    payload = {
+        "question": question,
+        "scene": json.loads(scene_json),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(f"[frame] 저장 → {path.name}")
+    return path
 
 DESCRIBE_WORDS = ("describe", "what do you see", "around me", "in front of")
 EMPTY_SEAT_WORDS = ("empty seat", "free chair", "vacant seat", "vacant chair",
@@ -147,6 +170,7 @@ def main():
                     except Exception:
                         pass
             snap = scene.snapshot_json()
+            _save_gemma_frame(question, snap)
             if _is_empty_seat_question(question):
                 answer = gemma_client.ask_streaming(question, snap, lambda _s: None)
                 speaker.say(answer.strip() if answer.strip()
