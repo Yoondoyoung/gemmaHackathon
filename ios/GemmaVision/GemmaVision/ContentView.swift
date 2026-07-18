@@ -27,6 +27,11 @@ struct ContentView: View {
                 Text(speechStatus)
                     .font(.caption)
                     .foregroundColor(.orange)
+                if !pipeline.activeGoal.isEmpty {
+                    Text("🎯 goal: \(pipeline.activeGoal)")
+                        .font(.caption)
+                        .foregroundColor(.pink)
+                }
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -102,9 +107,18 @@ struct ContentView: View {
                         guard pushToTalkEnabled, speechIn.state == .idle else { return }
                         isPressingTalk = true
                         speechIn.begin { question in
-                            gemma.ask(question,
-                                      scene: pipeline.snapshotJSON(),
-                                      imageJPEG: pipeline.frameJPEG())
+                            // 목적지 발화면 목표 설정(표지판 교차검증), 아니면 장면 Q&A
+                            if let goal = Pipeline.extractGoal(from: question) {
+                                pipeline.setGoal(spoken: goal.spoken,
+                                                 keywords: goal.keywords)
+                                SpeechOut.shared.say(
+                                    "Looking for the \(goal.spoken). "
+                                    + "I'll tell you when I see a sign.", priority: 1)
+                            } else {
+                                gemma.ask(question,
+                                          scene: pipeline.snapshotJSON(),
+                                          imageJPEG: pipeline.frameJPEG())
+                            }
                         }
                     }
                     .onEnded { _ in

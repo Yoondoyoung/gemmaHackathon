@@ -128,8 +128,12 @@ final class GemmaChat: ObservableObject {
     func ask(_ question: String, scene: String, imageJPEG: Data? = nil) {
         guard state == .ready, let engine else { return }
         state = .busy
+        SpeechOut.shared.beginAnswer()   // 답변 구간 진입 — 경고가 답을 끊지 못하게
         Task {
-            defer { state = .ready }
+            defer {
+                state = .ready
+                SpeechOut.shared.endAnswerStream()   // 스트림 끝(발화 완료는 별도)
+            }
             do {
                 let conversation = try await engine.createConversation()
                 // 이미지 → 질문 → hints 순. hints를 "Current scene"으로 부르면

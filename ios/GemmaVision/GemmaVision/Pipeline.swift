@@ -26,14 +26,35 @@ enum Config {
     static let confMin: Float = 0.4
     static let alertCooldown: TimeInterval = 5    // 라벨별 (ID churn 대응, Mac판 실측 반영)
     static let alertGlobalGap: TimeInterval = 2
-    static let ocrPeriod: TimeInterval = 2.5
+    static let ocrPeriod: TimeInterval = 1.2      // 시도 빈도↑ — 전광판 깜빡임/글레어 사이 깨끗한 프레임 확보
+    static let ocrMinConfidence: Float = 0.4      // 빛번짐으로 저하된 읽기도 살림 (nav/목표 필터가 잡음 차단)
     static let navWords: Set<String> = [
         "exit", "restroom", "toilet", "toilets", "wc", "men", "women",
         "ladies", "gents", "gate", "elevator", "lift", "stairs", "escalator",
         "entrance", "emergency", "information", "info", "cafeteria", "cafe",
         "parking", "reception", "push", "pull", "caution", "danger", "wet", "floor"]
-    static let signMinHeight: CGFloat = 0.05      // 프레임 대비 텍스트 높이
+    static let signMinHeight: CGFloat = 0.1      // 프레임 대비 텍스트 높이
     static let signRearmGap: TimeInterval = 10    // 사라졌다 재등장 시 재알림
+
+    // 목표(목적지) 기억: 발화에 목적지가 있으면 유사어 집합을 목표로 잡고,
+    // 이후 표지판이 매칭되면 "Found it" 알림 (Mac판 extract_goal 이식, 온디바이스 테이블).
+    static let destinationSynonyms: [String: [String]] = [
+        "restroom": ["restroom", "toilet", "toilets", "bathroom", "washroom",
+                     "wc", "men", "women", "ladies", "gents", "lavatory"],
+        "exit": ["exit", "exits", "way out"],
+        "elevator": ["elevator", "lift", "elevators"],
+        "stairs": ["stairs", "stairway", "staircase"],
+        "escalator": ["escalator", "escalators"],
+        "cafeteria": ["cafeteria", "cafe", "canteen", "dining", "food"],
+        "entrance": ["entrance", "entry"],
+        "information desk": ["information", "info", "reception", "help"],
+        "parking": ["parking", "garage"],
+        "gate": ["gate", "gates"],
+    ]
+    // 목적지 노출이 없어도 이 문구 뒤 단어를 단일 키워드 목표로 (테이블 밖 목적지)
+    static let goalIntentPhrases: [String] = [
+        "go to", "get to", "take me to", "looking for", "find the", "find a",
+        "find me", "where is", "where's", "need the", "need a", "want to go to"]
     static let announceGap: TimeInterval = 4
     /// YOLO26 end2end 입력 해상도 (CoreML imgsz).
     static let yoloInput: CGFloat = 640
@@ -71,8 +92,11 @@ final class Pipeline: ObservableObject {
     @Published var statusLine = "camera starting…"
     @Published var lastSpoken = ""
     @Published var boxes: [DetBox] = []   // 화면 박스 오버레이
+    @Published var activeGoal = ""        // 현재 목표(목적지) 표시용, 없으면 ""
     // 입력 방향: 라이브 카메라(가로 센서, 세로 파지)=.right / 영상 파일(이미 정립)=.up
     var inputOrientation: CGImagePropertyOrientation = .right
+    private let goalLock = NSLock()
+    private var goalKeywords: Set<String> = []   // handleTexts(백그라운드)에서 매칭
 
     private var model: VNCoreMLModel?
     private var lastAlertByLabel: [String: Date] = [:]
@@ -120,25 +144,50 @@ final class Pipeline: ObservableObject {
         queue.async { [self] in
             defer { processing = false }
             refreshJPEGIfNeeded(pixelBuffer)
+            // YOLO는 원본 프레임에서 (탐지엔 전처리 불필요)
             let detect = VNCoreMLRequest(model: model)
             detect.imageCropAndScaleOption = .scaleFill
-            var requests: [VNRequest] = [detect]
-            var ocr: VNRecognizeTextRequest?
-            if Date().timeIntervalSince(lastOCRAt) > Config.ocrPeriod {
-                lastOCRAt = Date()
-                let r = VNRecognizeTextRequest()
-                r.recognitionLevel = .accurate
-                ocr = r
-                requests.append(r)
-            }
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                                 orientation: inputOrientation)
-            try? handler.perform(requests)
+            try? handler.perform([detect])
             // YOLO26 end2end: MultiArray [1,300,6] — VNRecognizedObjectObservation 아님.
             let dets = Self.decodeYOLO26(detect.results)
             handleDetections(dets, depth: depth)
-            if let ocr { handleTexts(ocr.results ?? []) }
+
+            // OCR은 별도 핸들러 — 빛번짐 완화 전처리된 이미지에서 (전광판/LED 대응)
+            if Date().timeIntervalSince(lastOCRAt) > Config.ocrPeriod {
+                lastOCRAt = Date()
+                let ocr = Self.makeOCRRequest()
+                let ciImage = Self.deglared(pixelBuffer)
+                let ocrHandler = VNImageRequestHandler(ciImage: ciImage,
+                                                       orientation: inputOrientation)
+                try? ocrHandler.perform([ocr])
+                handleTexts(ocr.results ?? [])
+            }
         }
+    }
+
+    private static func makeOCRRequest() -> VNRecognizeTextRequest {
+        let r = VNRecognizeTextRequest()
+        r.recognitionLevel = .accurate
+        r.recognitionLanguages = ["en-US"]
+        r.usesLanguageCorrection = false   // 표지판은 산문이 아님 (EXIT/게이트번호) — 보정이 오히려 왜곡
+        r.minimumTextHeight = 0.02         // 먼 표지판도 시도
+        return r
+    }
+
+    /// 빛번짐(bloom) 완화: 하이라이트를 눌러 날아간 밝은 글자 복원 + 대비로 획 선명화.
+    /// 완전 포화(순백)된 LED는 복원 불가 — 그건 노출 문제라 소프트웨어 한계.
+    private static func deglared(_ pixelBuffer: CVPixelBuffer) -> CIImage {
+        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+        return ci
+            .applyingFilter("CIHighlightShadowAdjust",
+                            parameters: ["inputHighlightAmount": 0.25,
+                                         "inputShadowAmount": 0.3])
+            .applyingFilter("CIColorControls",
+                            parameters: [kCIInputContrastKey: 1.2,
+                                         kCIInputBrightnessKey: -0.08,
+                                         kCIInputSaturationKey: 0.6])
     }
 
     /// YOLO26 CoreML end2end 출력 `[1, 300, 6]` = `[x1,y1,x2,y2,conf,cls]` (640 픽셀, 좌상단).
@@ -196,6 +245,9 @@ final class Pipeline: ObservableObject {
                                    text: "\(det.label) \(tag)",
                                    alert: near && pos == "center"))
             guard near, pos == "center" else { continue }
+            // Q&A 답변 재생 중엔 경고를 내지 않는다 (쿨다운도 소진 안 함 —
+            // 답변 끝난 뒤 여전히 가까우면 즉시 다시 경고).
+            if SpeechOut.shared.suppressingWarnings { continue }
             let now = Date()
             if now.timeIntervalSince(lastAlertByLabel[det.label] ?? .distantPast)
                 < Config.alertCooldown { continue }
@@ -296,12 +348,15 @@ final class Pipeline: ObservableObject {
     private func handleTexts(_ observations: [VNRecognizedTextObservation]) {
         for obs in observations {
             guard let candidate = obs.topCandidates(1).first,
-                  candidate.confidence > 0.5 else { continue }
+                  candidate.confidence > Config.ocrMinConfidence else { continue }
             let content = candidate.string.trimmingCharacters(in: .whitespaces)
             guard content.count >= 2 else { continue }
             let words = Set(content.lowercased()
                 .components(separatedBy: CharacterSet.alphanumerics.inverted)
                 .filter { !$0.isEmpty })
+            let pos = position(ofMidX: obs.boundingBox.midX)
+            // 목표 매칭은 일반 알림 필터보다 먼저 (목표는 무조건 알림)
+            if matchGoal(words: words, content: content, pos: pos) { continue }
             let isNav = !words.isDisjoint(with: Config.navWords)
             let isBig = obs.boundingBox.height >= Config.signMinHeight
             guard isNav || isBig else { continue }              // 의미있는 것만
@@ -310,7 +365,6 @@ final class Pipeline: ObservableObject {
                     || content.allSatisfy({ $0.isNumber }) else { continue }
             let key = content.lowercased()
             let now = Date()
-            let pos = position(ofMidX: obs.boundingBox.midX)
             let seenBefore = signRecent[key]?.seen
             signRecent[key] = (now, pos, content)
             if let seen = seenBefore,
@@ -320,6 +374,51 @@ final class Pipeline: ObservableObject {
             speak("Sign detected: \(content), \(spoken(position(ofMidX: obs.boundingBox.midX)))",
                   priority: 1)
         }
+    }
+
+    // MARK: - 목표(목적지) 기억
+
+    /// 발화에서 목적지를 뽑아 (표시명, 유사어 집합) 반환. 목적지가 없으면 nil → 일반 Q&A.
+    static func extractGoal(from utterance: String) -> (spoken: String, keywords: Set<String>)? {
+        let lower = utterance.lowercased()
+        let tokens = Set(lower.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty })
+        // 1) 유사어 테이블 매칭 (가장 신뢰도 높음)
+        for (name, syns) in Config.destinationSynonyms where !tokens.isDisjoint(with: Set(syns)) {
+            return (name, Set(syns))
+        }
+        // 2) 의도 문구 뒤 명사를 단일 키워드로 (테이블 밖 목적지)
+        for phrase in Config.goalIntentPhrases {
+            guard let r = lower.range(of: phrase) else { continue }
+            let after = lower[r.upperBound...]
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty && !["the", "a", "an"].contains($0) }
+            if let noun = after.first, noun.count >= 3 {
+                return (noun, [noun])
+            }
+        }
+        return nil
+    }
+
+    func setGoal(spoken: String, keywords: Set<String>) {
+        goalLock.lock(); goalKeywords = keywords; goalLock.unlock()
+        DispatchQueue.main.async { self.activeGoal = spoken }
+    }
+
+    func clearGoal() {
+        goalLock.lock(); goalKeywords = []; goalLock.unlock()
+        DispatchQueue.main.async { self.activeGoal = "" }
+    }
+
+    /// 표지판 토큰이 목표 유사어와 겹치면 "Found it" 발화 후 목표 해제. 매칭 시 true.
+    private func matchGoal(words: Set<String>, content: String, pos: String) -> Bool {
+        goalLock.lock()
+        let hit = !goalKeywords.isEmpty && !words.isDisjoint(with: goalKeywords)
+        goalLock.unlock()
+        guard hit else { return false }
+        clearGoal()
+        speak("Found it — a sign for \(content), \(spoken(pos))", priority: 1)
+        return true
     }
 
     // MARK: - helpers

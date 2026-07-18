@@ -3,6 +3,7 @@
 // 사용법: 테스트 클립(nyc2.mp4 등)을 앱 타깃에 드래그 → VisionAssistApp의 루트를
 //   VideoTestView()로 잠깐 교체 → 실행. (LiDAR 없음 → 거리는 bbox 휴리스틱 폴백)
 import AVFoundation
+import Combine
 import CoreImage
 import SwiftUI
 import UIKit
