@@ -218,7 +218,10 @@ struct ContentView: View {
                                 gemma.ask(question,
                                           scene: pipeline.snapshotJSON(includeHistory: true),
                                           imageJPEG: nil)
-                            // 4) 목적지 발화면 목표 설정 (표지판 교차검증)
+                            // 4) 빈 자리 — YOLO chair↔person occupied (Gemma 비전 오판 우회)
+                            } else if Pipeline.isEmptySeatQuestion(question) {
+                                SpeechOut.shared.sayProtected(pipeline.answerEmptySeats())
+                            // 5) 목적지 발화면 목표 설정 (표지판 교차검증)
                             } else if let goal = Pipeline.extractGoal(from: question) {
                                 pipeline.setGoal(spoken: goal.spoken,
                                                  keywords: goal.keywords)
@@ -229,7 +232,7 @@ struct ContentView: View {
                                 SpeechOut.shared.sayProtected(
                                     "Looking for the \(goal.spoken). "
                                     + "I'll tell you when I see a sign.")
-                            // 5) 그 외 현재 장면 Q&A
+                            // 6) 그 외 현재 장면 Q&A
                             } else {
                                 let scene = pipeline.snapshotJSON()
                                 let jpeg = pipeline.frameJPEG()

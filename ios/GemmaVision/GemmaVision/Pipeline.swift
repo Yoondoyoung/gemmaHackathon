@@ -67,6 +67,13 @@ enum Config {
         "chair": 0.50, "potted plant": 0.50, "mouse": 0.55, "keyboard": 0.50]
     static let yoloMaxDets = 12                   // conf 상위만 — 패딩/잡음 슬롯 차단
     static let yoloMinBoxArea: CGFloat = 0.004    // 화면 대비 너무 작은 박스 무시
+    /// Mac config.CHAIR_OCCUPIED_IOU — person↔chair 겹치면 occupied
+    static let chairOccupiedIoU: CGFloat = 0.15
+    static let emptySeatPhrases: [String] = [
+        "empty seat", "empty seats", "free chair", "free chairs", "vacant seat",
+        "vacant chair", "where can i sit", "where can i sit", "find a seat",
+        "find an empty", "any empty", "is there a seat", "is there any seat",
+        "are there empty", "open seat", "available seat"]
     static let alertCooldown: TimeInterval = 5    // YOLO 라벨별 (ID churn 대응)
     static let alertGlobalGap: TimeInterval = 2
     static let ocrPeriod: TimeInterval = 2.0      // 16 Pro 열/메모리 여유 (이전이 1.2)
@@ -171,7 +178,8 @@ final class Pipeline: ObservableObject {
     // sceneLock: 쓰기는 pipeline.queue, 읽기는 PTT 순간 메인 스레드(snapshotJSON) —
     // Dictionary/Array 동시 접근은 크래시 벡터라 반드시 락.
     private let sceneLock = NSLock()
-    private var lastObjects: [(label: String, pos: String, dist: String)] = []
+    /// occupied: chair만 true/false, 그 외 nil
+    private var lastObjects: [(label: String, pos: String, dist: String, occupied: Bool?)] = []
     // ARKit Scene Geometry (벽/문/창/갈림길) — YOLO 보완, 룰베이스 경고만
     private let structureLock = NSLock()
     private var lastStructures: [StructureHit] = []
@@ -481,8 +489,10 @@ final class Pipeline: ObservableObject {
 
     private func handleDetections(_ detections: [Det], depth: CVPixelBuffer?) {
         var summary: [String] = []
-        var objects: [(String, String, String)] = []
+        var objects: [(label: String, pos: String, dist: String, occupied: Bool?)] = []
         var newBoxes: [DetBox] = []
+        let personBoxes = detections.filter { $0.label == "person" }.map(\.box)
+
         for (idx, det) in detections.enumerated() {
             let box = det.box
             let pos = position(ofMidX: box.midX)
@@ -497,12 +507,17 @@ final class Pipeline: ObservableObject {
                 near = box.height >= thresh && box.minY < Config.nearBottomMaxY
                 dist = near ? "near" : (box.height >= thresh * 0.5 ? "medium" : "far")
             }
-            objects.append((det.label, pos, dist))
+            let occupied: Bool? = (det.label == "chair" || det.label == "couch"
+                                   || det.label == "bench")
+                ? Self.seatOccupied(seat: box, persons: personBoxes)
+                : nil
+            objects.append((det.label, pos, dist, occupied))
             let tag = meters.map { String(format: "%.1fm", $0) }
                 ?? String(format: "h=%.2f", box.height)
-            summary.append("\(det.label) \(pos) \(tag)")
+            let occTag = occupied.map { $0 ? " occupied" : " empty" } ?? ""
+            summary.append("\(det.label) \(pos) \(tag)\(occTag)")
             newBoxes.append(DetBox(id: idx, visionBox: box,
-                                   text: "\(det.label) \(tag)",
+                                   text: "\(det.label) \(tag)\(occTag)",
                                    alert: near && pos == "center"))
             // 에피소드 기억은 경고보다 느슨하게 — near뿐 아니라 medium(수 m 내)도,
             // 어느 쪽(좌/중/우)이든 '지나친 것'으로 기록 (경고는 여전히 near+center만).
@@ -544,6 +559,24 @@ final class Pipeline: ObservableObject {
             self.statusLine = line
             self.boxes = newBoxes
         }
+    }
+
+    /// Mac `_chair_occupied` 이식 — IoU 또는 person 하단 중심이 의자 박스 안.
+    private static func seatOccupied(seat: CGRect, persons: [CGRect]) -> Bool {
+        for p in persons {
+            if iou(seat, p) >= Config.chairOccupiedIoU { return true }
+            let bottom = CGPoint(x: p.midX, y: p.minY)  // Vision 원점 좌하단
+            if seat.contains(bottom) { return true }
+        }
+        return false
+    }
+
+    private static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let inter = a.intersection(b)
+        guard !inter.isNull, inter.width > 0, inter.height > 0 else { return 0 }
+        let union = a.width * a.height + b.width * b.height - inter.width * inter.height
+        guard union > 0 else { return 0 }
+        return (inter.width * inter.height) / union
     }
 
     /// LiDAR 깊이 맵에서 bbox 중앙 50% 영역의 중앙값(미터).
@@ -606,8 +639,10 @@ final class Pipeline: ObservableObject {
         let objectsCopy = lastObjects
         let signsCopy = Array(signRecent.values)
         sceneLock.unlock()
-        let objs = objectsCopy.map {
-            "{\"label\": \"\($0.label)\", \"pos\": \"\($0.pos)\", \"dist\": \"\($0.dist)\"}"
+        let objs = objectsCopy.map { o -> String in
+            var s = "{\"label\": \"\(o.label)\", \"pos\": \"\(o.pos)\", \"dist\": \"\(o.dist)\""
+            if let occ = o.occupied { s += ", \"occupied\": \(occ)" }
+            return s + "}"
         }
         let now = Date()
         let texts = signsCopy
@@ -777,6 +812,53 @@ final class Pipeline: ObservableObject {
     static func isRecallQuestion(_ q: String) -> Bool {
         let lower = q.lowercased()
         return Config.recallPhrases.contains { lower.contains($0) }
+    }
+
+    /// "empty seats / where can I sit" — YOLO occupied 룰베이스 (Gemma 비전 오판 우회).
+    static func isEmptySeatQuestion(_ q: String) -> Bool {
+        let lower = q.lowercased()
+        if Config.emptySeatPhrases.contains(where: { lower.contains($0) }) { return true }
+        // "is there any empty seats" 등 변형
+        return (lower.contains("seat") || lower.contains("chair"))
+            && (lower.contains("empty") || lower.contains("free")
+                || lower.contains("vacant") || lower.contains("available")
+                || lower.contains("open"))
+    }
+
+    func answerEmptySeats() -> String {
+        sceneLock.lock()
+        let seats = lastObjects.filter {
+            $0.label == "chair" || $0.label == "couch" || $0.label == "bench"
+        }
+        let persons = lastObjects.filter { $0.label == "person" }
+        sceneLock.unlock()
+
+        let empty = seats.filter { $0.occupied == false }
+        let taken = seats.filter { $0.occupied == true }
+
+        if seats.isEmpty {
+            if persons.isEmpty {
+                return "I don't see any chairs ahead right now."
+            }
+            return "I see people, but no chairs in view to sit on."
+        }
+        if empty.isEmpty {
+            let side = uniqueOrder(taken.map(\.pos)).map(spoken).joined(separator: " and ")
+            return taken.count == 1
+                ? "There's a seat \(side), but it looks occupied."
+                : "I see \(taken.count) seats, but they all look occupied."
+        }
+        let places = uniqueOrder(empty.map(\.pos)).map(spoken)
+        if empty.count == 1 {
+            return "Yes — there's an empty seat \(places[0])."
+        }
+        return "Yes — \(empty.count) empty seats, \(places.joined(separator: " and "))."
+    }
+
+    private func uniqueOrder(_ items: [String]) -> [String] {
+        var seen = Set<String>(), out: [String] = []
+        for s in items where seen.insert(s).inserted { out.append(s) }
+        return out
     }
 
     /// "where's my backpack / take me back to my bag" → 공간 안내 문장 (룰베이스).
