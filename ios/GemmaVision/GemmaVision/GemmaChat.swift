@@ -16,6 +16,11 @@ final class GemmaChat: ObservableObject {
     @Published var lastAnswer = ""
     private var engine: Engine?
 
+    /// 맥 `python tools/prompt_log_server.py` 가 출력한 IP로 맞출 것 (같은 Wi‑Fi).
+    /// 예: "10.220.8.129"  — 비우면 맥 전송 생략, Xcode 콘솔 print만.
+    private static let macLogHost = "10.220.8.129"
+    private static let macLogPort = 8765
+
     static let systemPrompt = """
     You are a calm walking companion for a blind pedestrian. Speak like a helpful \
     friend beside them — plain spoken English, not a report or a computer log. \
@@ -76,6 +81,10 @@ final class GemmaChat: ObservableObject {
                 }
                 self.engine = engine
                 state = .ready
+                Self.postPromptLogToMac(
+                    question: "(app ready — log link ok)",
+                    image: "none",
+                    scene: "{}")
                 SpeechOut.shared.say(
                     "Assistant ready on \(backend == .gpu ? "GPU" : "CPU").",
                     priority: 1)
@@ -97,6 +106,10 @@ final class GemmaChat: ObservableObject {
                     try await engine.initialize()
                     self.engine = engine
                     state = .ready
+                    Self.postPromptLogToMac(
+                        question: "(app ready — log link ok)",
+                        image: "none",
+                        scene: "{}")
                     SpeechOut.shared.say("Assistant ready on CPU.", priority: 1)
                 } catch {
                     state = .failed("\(error)")
@@ -137,13 +150,30 @@ final class GemmaChat: ObservableObject {
     }
 
     func ask(_ question: String, scene: String, imageJPEG: Data? = nil) {
-        guard state == .ready, let engine else { return }
+        let hasImage = imageJPEG.map { !$0.isEmpty } ?? false
+        let imageKB = hasImage ? (imageJPEG!.count + 512) / 1024 : 0
+        let imageDesc = hasImage ? "yes \(imageKB)KB JPEG" : "none"
+
+        guard state == .ready, let engine else {
+            print("[gemma] ask skipped — state=\(state)")
+            Self.postPromptLogToMac(
+                question: "SKIPPED (\(String(describing: state))): \(question)",
+                image: imageDesc,
+                scene: scene)
+            return
+        }
         state = .busy
         SpeechOut.shared.beginAnswer()   // 답변 구간 진입 — 경고가 답을 끊지 못하게
+        print("""
+        [gemma →] Q: \(question)
+        image: \(imageDesc)
+        detector_hints: \(scene)
+        """)
         Task {
             defer {
                 state = .ready
                 SpeechOut.shared.endAnswerStream()   // 스트림 끝(발화 완료는 별도)
+                print("[gemma] ready again")
             }
             do {
                 let conversation = try await engine.createConversation()
@@ -182,6 +212,38 @@ final class GemmaChat: ObservableObject {
                 lastAnswer = "error: \(error)"
                 SpeechOut.shared.say("Sorry, I couldn't process that.", priority: 1)
             }
+        }
+    }
+
+    /// 맥 터미널 로그 서버로 fire-and-forget POST (실패해도 Q&A는 계속).
+    static func postPromptLogToMac(question: String, image: String, scene: String) {
+        let hosts = [
+            macLogHost,
+            "jeonghowon-ui-MacBookAir.local",
+        ].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+         .filter { !$0.isEmpty }
+        let body: [String: String] = [
+            "question": question,
+            "image": image,
+            "detector_hints": scene,
+        ]
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }
+
+        for host in hosts {
+            guard let url = URL(string: "http://\(host):\(macLogPort)/log") else { continue }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("close", forHTTPHeaderField: "Connection")
+            req.timeoutInterval = 3
+            req.httpBody = httpBody
+            URLSession.shared.dataTask(with: req) { _, response, error in
+                if let error {
+                    print("[gemma-log] \(host) failed: \(error.localizedDescription)")
+                } else if let http = response as? HTTPURLResponse {
+                    print("[gemma-log] \(host) → \(http.statusCode)")
+                }
+            }.resume()
         }
     }
 }

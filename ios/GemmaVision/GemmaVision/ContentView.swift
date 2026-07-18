@@ -117,14 +117,23 @@ struct ContentView: View {
                             } else if let goal = Pipeline.extractGoal(from: question) {
                                 pipeline.setGoal(spoken: goal.spoken,
                                                  keywords: goal.keywords)
+                                GemmaChat.postPromptLogToMac(
+                                    question: "GOAL: \(goal.spoken)",
+                                    image: "none",
+                                    scene: pipeline.snapshotJSON())
                                 SpeechOut.shared.say(
                                     "Looking for the \(goal.spoken). "
                                     + "I'll tell you when I see a sign.", priority: 1)
                             // 3) 그 외 현재 장면 Q&A
                             } else {
-                                gemma.ask(question,
-                                          scene: pipeline.snapshotJSON(),
-                                          imageJPEG: pipeline.frameJPEG())
+                                let scene = pipeline.snapshotJSON()
+                                let jpeg = pipeline.frameJPEG()
+                                let kb = jpeg.map { ($0.count + 512) / 1024 } ?? 0
+                                GemmaChat.postPromptLogToMac(
+                                    question: question,
+                                    image: jpeg == nil ? "none" : "yes \(kb)KB JPEG",
+                                    scene: scene)
+                                gemma.ask(question, scene: scene, imageJPEG: jpeg)
                             }
                         }
                     }
