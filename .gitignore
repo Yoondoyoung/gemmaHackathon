@@ -9,6 +9,10 @@ __pycache__/
 # 해커톤 이전 준비물 (제출 제외)
 _prep/
 
+# 내부 문서 (제출 제외, README는 예외)
+*.md
+!README.md
+
 # 테스트 클립 / 영상 (용량)
 clips/
 *.mp4
