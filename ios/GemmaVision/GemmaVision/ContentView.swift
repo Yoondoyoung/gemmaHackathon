@@ -12,12 +12,15 @@ struct ContentView: View {
     @StateObject private var gemma = GemmaChat()
     @StateObject private var speechIn = SpeechIn()
     @State private var isPressingTalk = false
+    @State private var showMesh = true   // 디버그: 분류별 컬러 메쉬
 
     var body: some View {
         ZStack(alignment: .top) {
             Group {
                 if useAR {
-                    ARCameraPreview(session: arCamera.session, boxes: pipeline.boxes)
+                    ARCameraPreview(session: arCamera.session,
+                                    boxes: pipeline.boxes,
+                                    showMesh: showMesh)
                 } else {
                     CameraPreview(session: camera.session, boxes: pipeline.boxes)
                 }
@@ -29,6 +32,11 @@ struct ContentView: View {
                 Text(useAR ? "ARKit mesh + YOLO" : "YOLO (no scene mesh)")
                     .font(.caption2.monospaced())
                     .foregroundColor(.white.opacity(0.7))
+                if useAR && showMesh {
+                    Text("mesh: floor·green  wall·orange  door·blue  window·cyan")
+                        .font(.caption2.monospaced())
+                        .foregroundColor(.white.opacity(0.65))
+                }
                 Text(pipeline.statusLine)
                     .font(.caption.monospaced())
                 Text(pipeline.lastSpoken)
@@ -51,6 +59,25 @@ struct ContentView: View {
             .background(.black.opacity(0.5))
             .foregroundColor(.green)
             .allowsHitTesting(false)
+
+            if useAR {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(showMesh ? "Mesh ON" : "Mesh OFF") {
+                            showMesh.toggle()
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(showMesh ? Color.green.opacity(0.85) : Color.gray.opacity(0.75))
+                        .foregroundColor(.white)
+                        .clipShape(Capsule())
+                        .padding(10)
+                    }
+                    Spacer()
+                }
+            }
 
             VStack {
                 Spacer()

@@ -8,8 +8,8 @@ import Foundation
 import simd
 
 struct StructureHit: Equatable {
-    let label: String   // wall | door | window
-    let meters: Double
+    let label: String   // wall | door | window | floor
+    let meters: Double  // 장애물=최근접 / floor=전방 바닥이 이어지는 거리
     let pos: String     // left | center | right
 }
 
@@ -27,11 +27,15 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "ar.camera")
     private var lastStructureAt = Date.distantPast
     private static let structurePeriod: TimeInterval = 0.25
-    /// 정면 판정 반각(도). 복도 측면 벽 스팸 억제.
-    private static let centerHalfAngleDeg: Double = 16
-    private static let sideHalfAngleDeg: Double = 40
-    /// 경고/스냅샷에 쓸 구조물만 (seat/table은 YOLO와 중복).
-    private static let alertClasses: Set<ARMeshClassification> = [.wall, .door, .window]
+    /// 정면 판정 반각(도). 실내 벽/문 스팸 억제 — 정말 코앞만 center.
+    private static let centerHalfAngleDeg: Double = 9
+    private static let sideHalfAngleDeg: Double = 28
+    /// 정면 center일 때 가로 오프셋 상한(m). 각도만으로는 가까운 측면 벽이 섞임.
+    private static let centerMaxLateralM: Double = 0.35
+    /// 장애물 클래스 (seat/table은 YOLO와 중복 → 제외).
+    private static let obstacleClasses: Set<ARMeshClassification> = [.wall, .door, .window]
+    /// 이동 가능 바닥.
+    private static let walkClasses: Set<ARMeshClassification> = [.floor]
 
     func start() {
         guard Self.isSupported else { return }
@@ -81,41 +85,53 @@ private extension ARCameraManager {
         let centerTan = tan(centerHalfAngleDeg * .pi / 180)
         let sideTan = tan(sideHalfAngleDeg * .pi / 180)
 
-        // label → 최근접 hit
-        var best: [String: StructureHit] = [:]
+        // 장애물: 라벨별 최근접 / 바닥: 정면 최원(이동 가능 거리)
+        var bestObstacle: [String: StructureHit] = [:]
+        var bestFloor: StructureHit?
 
         for anchor in meshes {
             let geometry = anchor.geometry
             let faceCount = geometry.faces.count
-            // 매 프레임 전수 검사는 비쌈 — 8개 중 1개만 샘플
             let step = max(1, faceCount / 800)
             var faceIndex = 0
             while faceIndex < faceCount {
                 defer { faceIndex += step }
                 let cls = classificationOf(faceIndex: faceIndex, geometry: geometry)
-                guard alertClasses.contains(cls) else { continue }
+                let isObstacle = obstacleClasses.contains(cls)
+                let isFloor = walkClasses.contains(cls)
+                guard isObstacle || isFloor else { continue }
                 guard let centerWorld = faceCenter(faceIndex: faceIndex,
                                                    geometry: geometry,
                                                    transform: anchor.transform)
                 else { continue }
 
                 let p4 = worldToCamera * SIMD4<Float>(centerWorld, 1)
-                // ARKit 카메라: -Z가 전방
-                guard p4.z < 0 else { continue }
+                guard p4.z < 0 else { continue }   // ARKit: -Z = 전방
                 let depth = Double(-p4.z)
-                guard depth > 0.25, depth < Config.mediumMeters + 1 else { continue }
+                guard depth > 0.25, depth < Config.mediumMeters + 1.5 else { continue }
 
-                // 카메라 쪽을 향한 면만 (복도 측면 벽 제외)
-                if let nCam = faceNormalCamera(faceIndex: faceIndex, geometry: geometry,
-                                               anchor: anchor.transform,
-                                               worldToCamera: worldToCamera),
-                   nCam.z < 0.35 {
-                    continue
+                if isObstacle {
+                    // 거의 정면을 향한 면만 (옆벽·비스듬한 문틀 제외)
+                    if let nCam = faceNormalCamera(faceIndex: faceIndex, geometry: geometry,
+                                                   anchor: anchor.transform,
+                                                   worldToCamera: worldToCamera),
+                       nCam.z < 0.55 {
+                        continue
+                    }
+                } else {
+                    // 바닥: 세계 좌표에서 위쪽을 향하는 면만
+                    if let nWorld = faceNormalWorld(faceIndex: faceIndex, geometry: geometry,
+                                                    anchor: anchor.transform),
+                       nWorld.y < 0.65 {
+                        continue
+                    }
                 }
 
-                let xRatio = abs(Double(p4.x)) / depth
+                let lateral = abs(Double(p4.x))
+                let xRatio = lateral / depth
                 let pos: String
-                if xRatio <= centerTan {
+                // center: 좁은 시야각 + 절대 가로 오프셋(가까운 옆벽 차단)
+                if xRatio <= centerTan && lateral <= centerMaxLateralM {
                     pos = "center"
                 } else if xRatio <= sideTan {
                     pos = p4.x < 0 ? "left" : "right"
@@ -123,28 +139,49 @@ private extension ARCameraManager {
                     continue
                 }
 
+                if isFloor {
+                    // 정면 바닥이 얼마나 멀리까지 이어지는지 (이동 가능 거리)
+                    guard pos == "center" else { continue }
+                    if bestFloor == nil || depth > bestFloor!.meters {
+                        bestFloor = StructureHit(label: "floor", meters: depth, pos: pos)
+                    }
+                    continue
+                }
+
                 let label = labelName(cls)
                 let hit = StructureHit(label: label, meters: depth, pos: pos)
-                if let prev = best[label], prev.meters <= hit.meters { continue }
-                // 같은 라벨이면 정면 우선, 그다음 거리
-                if let prev = best[label] {
+                if let prev = bestObstacle[label] {
                     let prevCenter = prev.pos == "center"
                     let newCenter = hit.pos == "center"
                     if prevCenter && !newCenter { continue }
                     if prevCenter == newCenter && prev.meters <= hit.meters { continue }
                 }
-                best[label] = hit
+                bestObstacle[label] = hit
             }
         }
-        return Array(best.values).sorted { $0.meters < $1.meters }
+
+        var out = Array(bestObstacle.values)
+        if let floor = bestFloor { out.append(floor) }
+        return out.sorted { $0.meters < $1.meters }
     }
 
     static func labelName(_ c: ARMeshClassification) -> String {
         switch c {
         case .door: return "door"
         case .window: return "window"
+        case .floor: return "floor"
         default: return "wall"
         }
+    }
+
+    static func faceNormalWorld(faceIndex: Int, geometry: ARMeshGeometry,
+                                anchor: simd_float4x4) -> SIMD3<Float>? {
+        let indices = vertexIndices(faceIndex: faceIndex, geometry: geometry)
+        guard indices.count == 3 else { return nil }
+        let v0 = worldVertex(indices[0], geometry: geometry, transform: anchor)
+        let v1 = worldVertex(indices[1], geometry: geometry, transform: anchor)
+        let v2 = worldVertex(indices[2], geometry: geometry, transform: anchor)
+        return simd_normalize(simd_cross(v1 - v0, v2 - v0))
     }
 
     static func classificationOf(faceIndex: Int,

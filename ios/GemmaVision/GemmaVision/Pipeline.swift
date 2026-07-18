@@ -31,11 +31,15 @@ enum Config {
     static let nearBottomMaxY: CGFloat = 0.25    // Vision 좌표(원점 좌하단): minY < 0.25 = 바닥 접점
     static let nearMeters: Double = 2.5          // LiDAR 실측 기준 (Mac판 depth 튜닝값)
     static let mediumMeters: Double = 5.0
-    /// ARKit 구조물(벽/문/창) — 벽은 더 가까울 때만 (복도 측면 스팸 방지)
-    static let structureNearMeters: Double = 2.5
-    static let wallAlertMeters: Double = 1.8
+    /// ARKit 구조물 경고 — 실내는 벽/문이 항상 보이므로 가깝고 정면일 때만
+    static let structureNearMeters: Double = 1.4   // 문/창 경고 거리
+    static let wallAlertMeters: Double = 1.1       // 벽은 더 가까이 (막다른 곳)
+    static let structureAlertCooldown: TimeInterval = 10  // 구조물 라벨 재경고 간격
+    /// 바닥이 이 거리 이상 이어지고 앞에 막힘이 없으면 "path clear" 안내
+    static let pathClearMinFloorM: Double = 1.5
+    static let pathClearCooldown: TimeInterval = 12
     static let confMin: Float = 0.4
-    static let alertCooldown: TimeInterval = 5    // 라벨별 (ID churn 대응, Mac판 실측 반영)
+    static let alertCooldown: TimeInterval = 5    // YOLO 라벨별 (ID churn 대응)
     static let alertGlobalGap: TimeInterval = 2
     static let ocrPeriod: TimeInterval = 1.2      // 시도 빈도↑ — 전광판 깜빡임/글레어 사이 깨끗한 프레임 확보
     static let ocrMinConfidence: Float = 0.4      // 빛번짐으로 저하된 읽기도 살림 (nav/목표 필터가 잡음 차단)
@@ -197,9 +201,9 @@ final class Pipeline: ObservableObject {
         }
     }
 
-    /// ARKit 메쉬 분류 결과 — 정면 벽/문/창만 룰베이스 경고 (LLM 금지).
+    /// ARKit 메쉬 분류 — 벽/문/창 장애 경고 + 바닥 이동가능 안내 (LLM 금지).
     func processStructures(_ hits: [StructureHit]) {
-        let hint = hits.prefix(3).map {
+        let hint = hits.prefix(4).map {
             String(format: "%@ %@ %.1fm", $0.label, $0.pos, $0.meters)
         }.joined(separator: " · ")
         structureLock.lock()
@@ -208,17 +212,22 @@ final class Pipeline: ObservableObject {
         structureLock.unlock()
 
         guard !SpeechOut.shared.suppressingWarnings else { return }
-        // 정면 + 근접만. 벽은 더 빡센 거리(복도 스팸 방지), 문/창은 nearMeters.
+
+        // 1) 장애물 경고 — 정면(center) + 가까운 거리만 (floor 제외)
         let candidates = hits.filter { hit in
             guard hit.pos == "center" else { return false }
-            if hit.label == "wall" { return hit.meters <= Config.wallAlertMeters }
-            return hit.meters <= Config.structureNearMeters
+            switch hit.label {
+            case "floor": return false
+            case "wall": return hit.meters <= Config.wallAlertMeters
+            case "door", "window": return hit.meters <= Config.structureNearMeters
+            default: return false
+            }
         }.sorted { $0.meters < $1.meters }
 
         for hit in candidates {
             let now = Date()
             if now.timeIntervalSince(lastAlertByLabel[hit.label] ?? .distantPast)
-                < Config.alertCooldown { continue }
+                < Config.structureAlertCooldown { continue }
             if now.timeIntervalSince(lastGlobalAlert) < Config.alertGlobalGap { continue }
             lastAlertByLabel[hit.label] = now
             lastGlobalAlert = now
@@ -226,8 +235,28 @@ final class Pipeline: ObservableObject {
             speak("\(hit.label) ahead, \(rounded) meter\(rounded > 1 ? "s" : "")",
                   priority: 0)
             logObjectPassed(hit.label, pos: hit.pos)
-            break   // 한 틱에 최대 1건
+            return   // 장애물이 있으면 path-clear는 이 틱에 생략
         }
+
+        // 2) 바닥이 이어지고 앞에 막힘이 없으면 이동 가능 안내
+        guard let floor = hits.first(where: { $0.label == "floor" && $0.pos == "center" }),
+              floor.meters >= Config.pathClearMinFloorM else { return }
+        let blocked = hits.contains {
+            $0.pos == "center"
+                && ($0.label == "wall" || $0.label == "door" || $0.label == "window")
+                && $0.meters < min(floor.meters, Config.structureNearMeters)
+        }
+        guard !blocked else { return }
+        let now = Date()
+        if now.timeIntervalSince(lastAlertByLabel["path_clear"] ?? .distantPast)
+            < Config.pathClearCooldown { return }
+        if now.timeIntervalSince(lastGlobalAlert) < Config.alertGlobalGap { return }
+        lastAlertByLabel["path_clear"] = now
+        lastGlobalAlert = now
+        let clearM = max(1, Int(min(floor.meters, Config.mediumMeters).rounded()))
+        speak("Path clear ahead, about \(clearM) meter\(clearM > 1 ? "s" : "")",
+              priority: 1)
+        logEpisode("clear path", pos: "center")
     }
 
     private static func makeOCRRequest() -> VNRecognizeTextRequest {
@@ -421,9 +450,19 @@ final class Pipeline: ObservableObject {
                 "{\"label\": \"%@\", \"pos\": \"%@\", \"dist\": \"%@\", \"depth_m\": %.1f}",
                 h.label, h.pos, dist, h.meters)
         }
+        // 정면 바닥이 이어지고 가까운 벽/문/창이 없으면 이동 가능
+        let floorM = structures.first { $0.label == "floor" && $0.pos == "center" }?.meters
+        let blocked = structures.contains {
+            $0.pos == "center"
+                && ($0.label == "wall" || $0.label == "door" || $0.label == "window")
+                && $0.meters < Config.structureNearMeters
+        }
+        let pathClear = (floorM ?? 0) >= Config.pathClearMinFloorM && !blocked
         var json = "{\"objects\": [\(objs.joined(separator: ", "))], " +
                    "\"texts\": [\(texts.joined(separator: ", "))], " +
-                   "\"structures\": [\(structs.joined(separator: ", "))]"
+                   "\"structures\": [\(structs.joined(separator: ", "))], " +
+                   "\"path_clear\": \(pathClear)" +
+                   (floorM.map { String(format: ", \"path_clear_m\": %.1f", $0) } ?? "")
         if includeHistory {   // 회상 질문에만 — 지나온 것들의 기록
             json += ", \"recent_history\": \(recentHistoryJSON())"
         }
