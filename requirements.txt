@@ -1,0 +1,20 @@
+# Vision
+ultralytics>=8.3.0        # YOLO26/YOLO11 + ByteTrack
+lap>=0.5.12               # ByteTrack 의존성 — 없으면 첫 track() 호출 때 자동 pip 설치 시도 (오프라인 함정)
+opencv-python>=4.10
+
+# Florence-2 (transformers 스택)
+torch>=2.4
+torchvision
+transformers==4.49.0      # 정확히 이 버전. 4.50+에서 Florence-2 remote code 깨짐 (실측 확인)
+timm                      # Florence-2 비전 인코더 의존성
+einops                    # Florence-2 의존성
+pillow
+
+# Audio
+faster-whisper>=1.0       # STT
+sounddevice               # 마이크 녹음
+numpy
+
+# LLM
+requests                  # Ollama HTTP API 호출용

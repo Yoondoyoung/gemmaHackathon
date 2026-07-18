@@ -1,0 +1,22 @@
+# 가상환경 / 캐시
+.venv/
+__pycache__/
+*.pyc
+
+# 모델 가중치 (setup.sh가 다운로드 — 저장소에 안 넣음)
+*.pt
+
+# 해커톤 이전 준비물 (제출 제외)
+_prep/
+
+# 테스트 클립 / 영상 (용량)
+clips/
+*.mp4
+*.mov
+
+# macOS / 에디터
+.DS_Store
+.claude/settings.local.json
+
+# 로그
+nohup.out
