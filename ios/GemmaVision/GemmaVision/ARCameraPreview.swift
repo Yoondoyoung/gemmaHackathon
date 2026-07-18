@@ -192,7 +192,13 @@ struct ARCameraPreview: UIViewRepresentable {
 
         func render(_ boxes: [DetBox]) {
             lastBoxes = boxes
-            let sig = boxes.map { "\($0.id):\($0.alert):\($0.text)" }.joined(separator: "|")
+            // geometry 포함 — 라벨만 같으면 박스가 멈추던 버그 방지
+            let sig = boxes.map {
+                let v = $0.visionBox
+                return String(format: "%d:%d:%.3f,%.3f,%.3f,%.3f:%@",
+                              $0.id, $0.alert ? 1 : 0,
+                              v.minX, v.minY, v.width, v.height, $0.text)
+            }.joined(separator: "|")
             guard sig != lastBoxSig else { return }
             lastBoxSig = sig
 
@@ -211,12 +217,27 @@ struct ARCameraPreview: UIViewRepresentable {
             band.lineDashPattern = [6, 4]
             overlay.addSublayer(band)
 
+            // ARSCNView 카메라와 동일 매핑: Vision(정립 BL) → metadata → displayTransform
+            let iface = window?.windowScene?.interfaceOrientation ?? .portrait
+            let displayT = session.currentFrame?
+                .displayTransform(for: iface, viewportSize: viewSize)
+
             for b in boxes {
-                let v = b.visionBox
-                let metadataRect = CGRect(x: 1 - v.maxY, y: 1 - v.maxX,
-                                          width: v.height, height: v.width)
-                let rect = Self.aspectFillRect(metadataRect, imageSize: imageSize,
+                let rect: CGRect
+                if let displayT {
+                    rect = Self.viewRect(visionBox: b.visionBox,
+                                         displayTransform: displayT,
+                                         viewSize: viewSize)
+                } else {
+                    // 프레임 없을 때: 정립 좌표 + 세로 oriented 버퍼로 aspect-fill
+                    let v = b.visionBox
+                    let norm = CGRect(x: v.minX, y: 1 - v.maxY,
+                                      width: v.width, height: v.height)
+                    let oriented = CGSize(width: imageSize.height,
+                                          height: imageSize.width)
+                    rect = Self.aspectFillRect(norm, imageSize: oriented,
                                                viewSize: viewSize)
+                }
                 guard rect.width > 1, rect.height > 1 else { continue }
                 let color: CGColor = b.alert
                     ? UIColor.systemRed.cgColor : UIColor.systemGreen.cgColor
@@ -237,6 +258,28 @@ struct ARCameraPreview: UIViewRepresentable {
                                      width: max(rect.width, 60), height: lh)
                 overlay.addSublayer(label)
             }
+        }
+
+        /// Vision(.right, 원점 좌하단) → 센서 metadata → AR displayTransform → 뷰 픽셀.
+        private static func viewRect(visionBox v: CGRect,
+                                     displayTransform: CGAffineTransform,
+                                     viewSize: CGSize) -> CGRect {
+            let metadata = CGRect(x: 1 - v.maxY, y: 1 - v.maxX,
+                                  width: v.height, height: v.width)
+            let corners = [
+                CGPoint(x: metadata.minX, y: metadata.minY),
+                CGPoint(x: metadata.maxX, y: metadata.minY),
+                CGPoint(x: metadata.minX, y: metadata.maxY),
+                CGPoint(x: metadata.maxX, y: metadata.maxY),
+            ].map { $0.applying(displayTransform) }
+            let xs = corners.map(\.x)
+            let ys = corners.map(\.y)
+            guard let x0 = xs.min(), let x1 = xs.max(),
+                  let y0 = ys.min(), let y1 = ys.max() else { return .zero }
+            return CGRect(x: x0 * viewSize.width,
+                          y: y0 * viewSize.height,
+                          width: (x1 - x0) * viewSize.width,
+                          height: (y1 - y0) * viewSize.height)
         }
 
         private static func aspectFillRect(_ norm: CGRect, imageSize: CGSize,

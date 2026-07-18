@@ -21,7 +21,8 @@ struct ContentView: View {
                 if useAR {
                     ARCameraPreview(session: arCamera.session,
                                     boxes: pipeline.boxes,
-                                    showMesh: arCamera.meshEnabled)
+                                    showMesh: arCamera.meshEnabled,
+                                    imageSize: arCamera.frameSize)
                 } else {
                     CameraPreview(session: camera.session, boxes: pipeline.boxes)
                 }

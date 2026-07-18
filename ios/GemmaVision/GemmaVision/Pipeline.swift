@@ -76,7 +76,7 @@ enum Config {
         "are there empty", "open seat", "available seat"]
     static let alertCooldown: TimeInterval = 5    // YOLO 라벨별 (ID churn 대응)
     static let alertGlobalGap: TimeInterval = 2
-    static let ocrPeriod: TimeInterval = 2.0      // 16 Pro 열/메모리 여유 (이전이 1.2)
+    static let ocrPeriod: TimeInterval = 1.0      // 표지판 반응성 (이전 2.0)
     /// 30fps는 발열·드랍으로 후반 품질 저하. 데모 3분이면 15fps면 충분.
     static let yoloMinInterval: TimeInterval = 1.0 / 15.0
     static let ocrMinConfidence: Float = 0.4      // 빛번짐으로 저하된 읽기도 살림 (nav/목표 필터가 잡음 차단)

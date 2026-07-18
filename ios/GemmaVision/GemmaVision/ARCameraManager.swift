@@ -31,6 +31,8 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
     /// sceneReconstruction 실제 on/off — UI용 (메인에서만 갱신)
     @Published private(set) var meshEnabled = false
     @Published var mapStatus = ""          // WorldMap 저장/로드 상태
+    /// capturedImage 픽셀 크기 (센서 네이티브, 보통 landscape) — 박스 폴백 매핑용
+    @Published private(set) var frameSize = CGSize(width: 1920, height: 1440)
     /// (영상, 깊이, 카메라 월드 위치, 수평 전방)
     var onFrame: ((CVPixelBuffer, CVPixelBuffer?, SIMD3<Float>, SIMD3<Float>) -> Void)?
     var onStructures: ((StructureUpdate) -> Void)?
@@ -45,6 +47,8 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
     private var meshOn = false
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var lastPoseForClear: (SIMD3<Float>, SIMD3<Float>)?
+    /// 델리게이트 큐에서만 비교 (메인 @Published와 경합 방지)
+    private var lastFrameSize = CGSize.zero
     private static let structurePeriod: TimeInterval = 0.4   // 메쉬 스캔 부하↓
     /// tracking normal + 메쉬 있을 때 주기 자동저장
     private static let autoSavePeriod: TimeInterval = 20
@@ -249,6 +253,15 @@ extension ARCameraManager: ARSessionDelegate {
         let depth = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
         let (position, forward) = Self.pose(from: frame.camera.transform)
         lastPoseForClear = (position, forward)
+        let w = CGFloat(CVPixelBufferGetWidth(pixel))
+        let h = CGFloat(CVPixelBufferGetHeight(pixel))
+        if abs(lastFrameSize.width - w) > 0.5 || abs(lastFrameSize.height - h) > 0.5 {
+            lastFrameSize = CGSize(width: w, height: h)
+            let size = lastFrameSize
+            DispatchQueue.main.async { [weak self] in
+                self?.frameSize = size
+            }
+        }
         onFrame?(pixel, depth, position, forward)
 
         // 메쉬 OFF: 구조물 스캔·자동저장 스킵 (YOLO/포즈/깊이는 위 onFrame으로 계속)
