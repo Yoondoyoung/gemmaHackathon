@@ -17,6 +17,7 @@ _history = deque(maxlen=3)   # 후속 대화용 (질문, 답변) — 그 이상 
 
 
 def _post(payload, stream=False):
+    payload.setdefault("keep_alive", config.GEMMA_KEEP_ALIVE)  # 유휴 언로드 방지
     return requests.post(config.OLLAMA_URL, json=payload, stream=stream,
                          timeout=config.GEMMA_TIMEOUT_SEC)
 

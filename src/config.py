@@ -7,6 +7,8 @@ YOLO_WEIGHTS = "yolo26n.pt"          # 로드 실패 시 YOLO_FALLBACK
 YOLO_FALLBACK = "yolo11n.pt"
 YOLO_CONF = 0.4
 YOLO_DEVICE = "mps"
+YOLO_MAX_FPS = 15                    # 경고용으론 충분. 60fps 풀가동은 GPU 경합(프레임드랍
+                                     # 체감 원인)과 팬리스 M1 발열만 키운다 — 실측 진단
 
 # 경고/추적 대상 클래스 (COCO) — 이외는 SceneState에도 안 넣음 (노이즈 억제)
 TRACK_LABELS = {"person", "chair", "bicycle", "car", "dog", "backpack",
@@ -66,6 +68,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 GEMMA_MODEL = "gemma3:4b"
 GEMMA_MAX_TOKENS = 80
 GEMMA_TIMEOUT_SEC = 30
+GEMMA_KEEP_ALIVE = "30m"             # 유휴 언로드 방지 — 언로드되면 다음 질문에 리로드 5~10초
 
 WHISPER_MODEL = "small.en"
 SAMPLE_RATE = 16000

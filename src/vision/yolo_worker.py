@@ -32,12 +32,16 @@ def load_model():
 def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
     """shared: {"overlay": np.ndarray, "fps": float} — main이 그리기용으로 읽음."""
     model = load_model()
+    min_interval = 1.0 / config.YOLO_MAX_FPS
+    last_iter = time.time()
     while not stop_flag.is_set():
         frame = camera.latest()
         if frame is None:
             time.sleep(0.05)
             continue
         t0 = time.time()
+        shared["fps"] = 1.0 / max(t0 - last_iter, 1e-6)   # 스로틀 포함 실효 루프 속도
+        last_iter = t0
         res = model.track(frame, persist=True, device=config.YOLO_DEVICE,
                           conf=config.YOLO_CONF, verbose=False,
                           tracker="bytetrack.yaml")[0]
@@ -69,7 +73,8 @@ def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
             cv2.putText(overlay, tag, (d["_xy"][0], max(d["_xy"][1] - 6, 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
         shared["overlay"] = overlay
-        shared["fps"] = 1.0 / max(time.time() - t0, 1e-6)
+        # GPU 양보: 스로틀로 Florence/Depth/Gemma에게 커널 창을 내준다 (경합 완화)
+        time.sleep(max(0.0, min_interval - (time.time() - t0)))
 
 
 if __name__ == "__main__":
