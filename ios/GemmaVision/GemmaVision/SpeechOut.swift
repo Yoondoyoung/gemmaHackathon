@@ -1,6 +1,6 @@
 // 발화 출력 — 우선순위 정책:
 // - 평소: priority 0(경고)가 안내(priority 1)를 끊을 수 있음 (안전).
-// - Gemma 답변 중(생성+TTS 재생): 경고 완전 억제 — 답을 끊지 않음.
+// - 보호 답변 중(Gemma + 룰베이스 findBack/회상/목표 확인): 경고 완전 억제.
 // - PTT 듣는 중에도 경고 억제. interrupt/stop으로 즉시 해제.
 import AVFoundation
 
@@ -76,6 +76,7 @@ final class SpeechOut: NSObject, AVSpeechSynthesizerDelegate {
         activatePlaybackSession()
         lock.lock()
         muted = false
+        micOpen = false
         isAnswering = true
         streamDone = false
         answerIDs.removeAll()
@@ -94,6 +95,13 @@ final class SpeechOut: NSObject, AVSpeechSynthesizerDelegate {
             isAnswering = false
         }
         lock.unlock()
+    }
+
+    /// 룰베이스 안내 한 문장 — Gemma와 같이 TTS 끝날 때까지 p0 경고 억제.
+    func sayProtected(_ text: String) {
+        beginAnswer()
+        say(text, priority: 1)
+        endAnswerStream()
     }
 
     /// PTT / interrupt — TTS·억제 즉시 해제.

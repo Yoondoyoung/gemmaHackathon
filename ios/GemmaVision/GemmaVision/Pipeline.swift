@@ -155,6 +155,9 @@ final class Pipeline: ObservableObject {
     private var processing = false
     private let queue = DispatchQueue(label: "pipeline.queue", qos: .userInitiated)
     // Gemma 스냅샷용 미니 SceneState (Mac판 스키마 축소 이식)
+    // sceneLock: 쓰기는 pipeline.queue, 읽기는 PTT 순간 메인 스레드(snapshotJSON) —
+    // Dictionary/Array 동시 접근은 크래시 벡터라 반드시 락.
+    private let sceneLock = NSLock()
     private var lastObjects: [(label: String, pos: String, dist: String)] = []
     // ARKit Scene Geometry (벽/문/창/갈림길) — YOLO 보완, 룰베이스 경고만
     private let structureLock = NSLock()
@@ -244,7 +247,13 @@ final class Pipeline: ObservableObject {
 
     /// ARKit 메쉬 — 벽/문/창 경고 + 갈림길 + 지나침 + 직진 안내 (LLM 금지).
     /// 경로는 GPS가 아니라 `update`의 ARKit 월드 좌표를 사용.
+    /// AR 델리게이트 큐에서 오지만, lastAlertByLabel 등 공유 상태가 YOLO 경로
+    /// (pipeline.queue)와 겹치므로 같은 큐로 직렬화 (Dictionary 동시 변경 방지).
     func processStructures(_ update: StructureUpdate) {
+        queue.async { [self] in processStructuresSerialized(update) }
+    }
+
+    private func processStructuresSerialized(_ update: StructureUpdate) {
         let hits = update.hits
         let hint = hits.prefix(5).map {
             String(format: "%@ %@ %.1fm", $0.label, $0.pos, $0.meters)
@@ -505,7 +514,9 @@ final class Pipeline: ObservableObject {
                 speak("\(det.label) ahead, close", priority: 0)
             }
         }
+        sceneLock.lock()
         lastObjects = objects
+        sceneLock.unlock()
         structureLock.lock()
         let mesh = structureStatus
         structureLock.unlock()
@@ -573,11 +584,15 @@ final class Pipeline: ObservableObject {
 
     /// Gemma 프롬프트용 장면 스냅샷 (Mac판 SceneState.snapshot_json 축소 이식)
     func snapshotJSON(includeHistory: Bool = false) -> String {
-        let objs = lastObjects.map {
+        sceneLock.lock()
+        let objectsCopy = lastObjects
+        let signsCopy = Array(signRecent.values)
+        sceneLock.unlock()
+        let objs = objectsCopy.map {
             "{\"label\": \"\($0.label)\", \"pos\": \"\($0.pos)\", \"dist\": \"\($0.dist)\"}"
         }
         let now = Date()
-        let texts = signRecent.values
+        let texts = signsCopy
             .filter { now.timeIntervalSince($0.seen) < 30 }
             .sorted { $0.seen > $1.seen }
             .prefix(6)
@@ -644,8 +659,10 @@ final class Pipeline: ObservableObject {
                     || content.allSatisfy({ $0.isNumber }) else { continue }
             let key = content.lowercased()
             let now = Date()
+            sceneLock.lock()
             let seenBefore = signRecent[key]?.seen
             signRecent[key] = (now, pos, content)
+            sceneLock.unlock()
             // 공간 기억은 알림 여부와 무관하게 (되돌아가기용)
             rememberSign(content: content, screenPos: pos, box: obs.boundingBox,
                          depth: depth)
@@ -794,8 +811,10 @@ final class Pipeline: ObservableObject {
 
     /// 질문에서 찾을 라벨을 뽑아, 기억된 월드 좌표 기준으로 돌아갈 방향을 말함.
     func guideBack(for question: String) -> String? {
+        // nil 반환 = ContentView가 다음 경로(회상→목표→Gemma)로 폴스루.
+        // 문자열을 반환하면 라우팅이 여기서 끝나므로, '안내할 수 있을 때만' 문자열.
         guard let pose = lastPose else {
-            return "I can guide you once we have a room scan. Keep the camera moving for a moment."
+            return nil   // 포즈 없음(비 LiDAR 기기 포함) → 목표 설정/Gemma로
         }
         let lower = question.lowercased()
         memoryLock.lock()
@@ -811,7 +830,7 @@ final class Pipeline: ObservableObject {
             .filter { memoryMatches(question: lower, mem: $0) }
             .max(by: { $0.seenAt < $1.seenAt })
         guard let mem = match else {
-            return "I don't have a saved place for that yet. Point the camera at it once and I'll remember."
+            return nil   // 저장된 기억 없음 — "Where is the restroom" 등은 목표 설정으로 폴스루
         }
 
         let age = Int(now.timeIntervalSince(mem.seenAt).rounded())

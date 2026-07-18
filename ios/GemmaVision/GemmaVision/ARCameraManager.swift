@@ -43,6 +43,8 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
     /// tracking normal + 메쉬 있을 때 주기 자동저장
     private static let autoSavePeriod: TimeInterval = 20
     private static let autoSaveMinMeshAnchors = 2
+    /// 구조물 스캔: 카메라에서 이보다 먼 메쉬 앵커는 스킵 (누적 메쉬 CPU 고정)
+    private static let meshScanRadiusM: Float = 8
 
     private static let screenCenterMinX: CGFloat = 1.0 / 3.0
     private static let screenCenterMaxX: CGFloat = 2.0 / 3.0
@@ -243,7 +245,16 @@ extension ARCameraManager: ARSessionDelegate {
 
 private extension ARCameraManager {
     func scanStructures(frame: ARFrame) -> [StructureHit] {
-        let meshes = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+        let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                                  frame.camera.transform.columns.3.y,
+                                  frame.camera.transform.columns.3.z)
+        // 멀리 쌓인 과거 메쉬는 스캔하지 않음 — 데모 후반 CPU/발열 급증 방지
+        let meshes = frame.anchors.compactMap { $0 as? ARMeshAnchor }.filter {
+            let p = SIMD3<Float>($0.transform.columns.3.x,
+                                 $0.transform.columns.3.y,
+                                 $0.transform.columns.3.z)
+            return simd_length(p - camPos) <= Self.meshScanRadiusM
+        }
         guard !meshes.isEmpty else { return [] }
 
         let worldToCamera = simd_inverse(frame.camera.transform)

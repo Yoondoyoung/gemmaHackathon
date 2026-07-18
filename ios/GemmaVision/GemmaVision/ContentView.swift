@@ -183,14 +183,12 @@ struct ContentView: View {
                             //    (GPS 아님. YOLO 탐지 위치를 LiDAR+포즈로 저장해 둔 것)
                             if Pipeline.isFindBackQuestion(question),
                                let guide = pipeline.guideBack(for: question) {
-                                SpeechOut.shared.unmuteForSpeech()
-                                SpeechOut.shared.say(guide, priority: 1)
+                                SpeechOut.shared.sayProtected(guide)
                             // 2) "Did I pass the restroom / my bag?" → 에피소드·표지판 기억 (룰베이스)
                             //    Gemma 우회: 동의어(restroom↔WC/toilet) 매칭 + Yes/No
                             } else if Pipeline.isRecallQuestion(question),
                                       let recall = pipeline.answerRecall(for: question) {
-                                SpeechOut.shared.unmuteForSpeech()
-                                SpeechOut.shared.say(recall, priority: 1)
+                                SpeechOut.shared.sayProtected(recall)
                             // 3) 모호한 회상만 Gemma + recent_history
                             } else if Pipeline.isRecallQuestion(question) {
                                 gemma.ask(question,
@@ -204,10 +202,9 @@ struct ContentView: View {
                                     question: "GOAL: \(goal.spoken)",
                                     image: "none",
                                     scene: pipeline.snapshotJSON())
-                                SpeechOut.shared.unmuteForSpeech()
-                                SpeechOut.shared.say(
+                                SpeechOut.shared.sayProtected(
                                     "Looking for the \(goal.spoken). "
-                                    + "I'll tell you when I see a sign.", priority: 1)
+                                    + "I'll tell you when I see a sign.")
                             // 5) 그 외 현재 장면 Q&A
                             } else {
                                 let scene = pipeline.snapshotJSON()
