@@ -31,6 +31,9 @@ enum Config {
     static let nearBottomMaxY: CGFloat = 0.25    // Vision 좌표(원점 좌하단): minY < 0.25 = 바닥 접점
     static let nearMeters: Double = 2.5          // LiDAR 실측 기준 (Mac판 depth 튜닝값)
     static let mediumMeters: Double = 5.0
+    /// ARKit 구조물(벽/문/창) — 벽은 더 가까울 때만 (복도 측면 스팸 방지)
+    static let structureNearMeters: Double = 2.5
+    static let wallAlertMeters: Double = 1.8
     static let confMin: Float = 0.4
     static let alertCooldown: TimeInterval = 5    // 라벨별 (ID churn 대응, Mac판 실측 반영)
     static let alertGlobalGap: TimeInterval = 2
@@ -131,6 +134,10 @@ final class Pipeline: ObservableObject {
     private let queue = DispatchQueue(label: "pipeline.queue")
     // Gemma 스냅샷용 미니 SceneState (Mac판 스키마 축소 이식)
     private var lastObjects: [(label: String, pos: String, dist: String)] = []
+    // ARKit Scene Geometry (벽/문/창) — YOLO 보완, 룰베이스 경고만
+    private let structureLock = NSLock()
+    private var lastStructures: [StructureHit] = []
+    private var structureStatus = ""
     // Q&A용 최신 프레임 (JPEG). 탐지 루프에서 스로틀 갱신.
     private let jpegLock = NSLock()
     private var latestJPEG: Data?
@@ -187,6 +194,39 @@ final class Pipeline: ObservableObject {
                 try? ocrHandler.perform([ocr])
                 handleTexts(ocr.results ?? [])
             }
+        }
+    }
+
+    /// ARKit 메쉬 분류 결과 — 정면 벽/문/창만 룰베이스 경고 (LLM 금지).
+    func processStructures(_ hits: [StructureHit]) {
+        let hint = hits.prefix(3).map {
+            String(format: "%@ %@ %.1fm", $0.label, $0.pos, $0.meters)
+        }.joined(separator: " · ")
+        structureLock.lock()
+        lastStructures = hits
+        structureStatus = hint
+        structureLock.unlock()
+
+        guard !SpeechOut.shared.suppressingWarnings else { return }
+        // 정면 + 근접만. 벽은 더 빡센 거리(복도 스팸 방지), 문/창은 nearMeters.
+        let candidates = hits.filter { hit in
+            guard hit.pos == "center" else { return false }
+            if hit.label == "wall" { return hit.meters <= Config.wallAlertMeters }
+            return hit.meters <= Config.structureNearMeters
+        }.sorted { $0.meters < $1.meters }
+
+        for hit in candidates {
+            let now = Date()
+            if now.timeIntervalSince(lastAlertByLabel[hit.label] ?? .distantPast)
+                < Config.alertCooldown { continue }
+            if now.timeIntervalSince(lastGlobalAlert) < Config.alertGlobalGap { continue }
+            lastAlertByLabel[hit.label] = now
+            lastGlobalAlert = now
+            let rounded = max(1, Int(hit.meters.rounded()))
+            speak("\(hit.label) ahead, \(rounded) meter\(rounded > 1 ? "s" : "")",
+                  priority: 0)
+            logObjectPassed(hit.label, pos: hit.pos)
+            break   // 한 틱에 최대 1건
         }
     }
 
@@ -289,7 +329,11 @@ final class Pipeline: ObservableObject {
             }
         }
         lastObjects = objects
-        let line = summary.isEmpty ? "clear" : summary.joined(separator: " | ")
+        structureLock.lock()
+        let mesh = structureStatus
+        structureLock.unlock()
+        var line = summary.isEmpty ? "clear" : summary.joined(separator: " | ")
+        if !mesh.isEmpty { line += " || mesh: \(mesh)" }
         DispatchQueue.main.async {
             self.statusLine = line
             self.boxes = newBoxes
@@ -365,8 +409,21 @@ final class Pipeline: ObservableObject {
                 "{\"content\": \"\($0.content)\", \"pos\": \"\($0.pos)\", " +
                 "\"age_sec\": \(Int(now.timeIntervalSince($0.seen)))}"
             }
+        structureLock.lock()
+        let structures = lastStructures
+        structureLock.unlock()
+        let structs = structures.prefix(4).map { h -> String in
+            let dist: String
+            if h.meters <= Config.nearMeters { dist = "near" }
+            else if h.meters <= Config.mediumMeters { dist = "medium" }
+            else { dist = "far" }
+            return String(format:
+                "{\"label\": \"%@\", \"pos\": \"%@\", \"dist\": \"%@\", \"depth_m\": %.1f}",
+                h.label, h.pos, dist, h.meters)
+        }
         var json = "{\"objects\": [\(objs.joined(separator: ", "))], " +
-                   "\"texts\": [\(texts.joined(separator: ", "))]"
+                   "\"texts\": [\(texts.joined(separator: ", "))], " +
+                   "\"structures\": [\(structs.joined(separator: ", "))]"
         if includeHistory {   // 회상 질문에만 — 지나온 것들의 기록
             json += ", \"recent_history\": \(recentHistoryJSON())"
         }

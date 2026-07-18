@@ -1,8 +1,12 @@
 // 카메라 프리뷰 + 디버그 오버레이 (심사위원용 — 실사용자는 음성만 듣는다)
+// Pro(LiDAR): ARKit Scene Geometry 경로 — 벽/문/창 메쉬 + sceneDepth.
+// 그 외: 기존 AVCapture (+ DepthDataOutput 있으면 깊이만).
 import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
+    private let useAR = ARCameraManager.isSupported
+    @StateObject private var arCamera = ARCameraManager()
     @StateObject private var camera = CameraManager()
     @StateObject private var pipeline = Pipeline()
     @StateObject private var gemma = GemmaChat()
@@ -11,11 +15,20 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            CameraPreview(session: camera.session, boxes: pipeline.boxes)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)   // 프리뷰가 PTT 터치를 가로채지 않게
+            Group {
+                if useAR {
+                    ARCameraPreview(session: arCamera.session, boxes: pipeline.boxes)
+                } else {
+                    CameraPreview(session: camera.session, boxes: pipeline.boxes)
+                }
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)   // 프리뷰가 PTT 터치를 가로채지 않게
 
             VStack(alignment: .leading, spacing: 6) {
+                Text(useAR ? "ARKit mesh + YOLO" : "YOLO (no scene mesh)")
+                    .font(.caption2.monospaced())
+                    .foregroundColor(.white.opacity(0.7))
                 Text(pipeline.statusLine)
                     .font(.caption.monospaced())
                 Text(pipeline.lastSpoken)
@@ -47,11 +60,20 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            camera.onFrame = { pipeline.process($0, depth: $1) }
-            camera.start()
+            if useAR {
+                arCamera.onFrame = { pipeline.process($0, depth: $1) }
+                arCamera.onStructures = { pipeline.processStructures($0) }
+                arCamera.start()
+            } else {
+                camera.onFrame = { pipeline.process($0, depth: $1) }
+                camera.start()
+            }
             gemma.load()
             speechIn.prepare()
-            SpeechOut.shared.say("Vision assist started. Hold the button to ask.", priority: 1)
+            let boot = useAR
+                ? "Vision assist started with scene mesh. Hold the button to ask."
+                : "Vision assist started. Hold the button to ask."
+            SpeechOut.shared.say(boot, priority: 1)
         }
     }
 

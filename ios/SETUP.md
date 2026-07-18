@@ -72,7 +72,15 @@ hf_hub_download('litert-community/gemma-4-E2B-it-litert-lm', \
 
 ## 아키텍처 메모 (발표 대비)
 탐지는 Neural Engine(YOLO26 CoreML), OCR·음성은 iOS 네이티브(Vision/AVSpeech),
-거리는 LiDAR 실측(폴백: bbox 휴리스틱), LLM은 LiteRT-LM 위 Gemma 4 E2B
-(온디바이스, 메모리 607MB~1.4GB — e-시리즈 설계 의도의 실증). Mac 데모와
-동일한 SceneState 원칙(검증된 탐지 사실만 LLM에 투입, 경고 경로는 룰베이스
-유지)을 Swift로 그대로 이식했습니다.
+구조물(벽/문/창)은 **ARKit Scene Geometry + LiDAR 메쉬 분류**(SegFormer 등
+별도 세그 모델 없음 — NPU/전용 하드웨어), 거리는 `sceneDepth` 실측(폴백:
+bbox 휴리스틱), LLM은 LiteRT-LM 위 Gemma 4 E2B(온디바이스). Pro 기기에서는
+카메라가 `ARSession`으로 통합되고, 비-LiDAR는 기존 `AVCapture` 경로로
+자동 폴백. 경고는 계속 룰베이스만(정면 문/창 ≤2.5m, 벽 ≤1.8m). Mac 데모와
+동일한 SceneState 원칙(검증된 탐지 사실만 LLM에 투입)을 Swift로 이식했습니다.
+
+## ARKit 메쉬 검증 (LiDAR Pro)
+- [ ] 상단 배지 `ARKit mesh + YOLO` 표시
+- [ ] 상태줄에 `mesh: door center 1.9m` 형태가 수 초 내 등장 (공간 스캔 필요)
+- [ ] 문/창에 다가가면 `"door ahead, N meters"` / `"window ahead, N meters"`
+- [ ] 복도 측면 벽에는 거의 울리지 않고, 막다른 벽(~1.8m)에만 wall 경고

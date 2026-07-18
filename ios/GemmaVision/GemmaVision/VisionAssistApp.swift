@@ -1,6 +1,6 @@
 // 시각 보조 어시스턴트 iOS PoC — Mac 파이프라인의 모바일 이식 검증용.
-// 스코프: 카메라 + YOLO(CoreML/ANE) + 룰베이스 경고 + Vision OCR + AVSpeech.
-// Gemma Q&A는 의도적으로 제외 (Mac 데모 담당) — PoC의 목적은 "코어가 폰에서 돈다".
+// 스코프: ARKit 메쉬(벽/문/창) + YOLO(CoreML/ANE) + 룰베이스 경고 + Vision OCR
+// + AVSpeech + Gemma 4 E2B 온디바이스 Q&A.
 import SwiftUI
 
 @main
