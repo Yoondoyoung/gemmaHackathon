@@ -14,6 +14,8 @@ struct ContentView: View {
     @State private var isPressingTalk = false
     // 표시만 OFF — ARKit 벽/바닥/갈림길 기능은 Mesh 토글과 무관하게 항상 동작
     @State private var showMesh = false
+    /// Gemma(GPU) init이 ARKit보다 먼저 끝나게 — Metal 경합으로 GPU→CPU 폴백 방지
+    @State private var sensorsStarted = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -96,32 +98,51 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            if useAR {
-                arCamera.onFrame = { pixel, depth, pos, fwd in
-                    pipeline.process(pixel, depth: depth, pose: (pos, fwd))
-                }
-                arCamera.onStructures = { pipeline.processStructures($0) }
-                arCamera.start(withSavedMap: true)   // 있으면 자동 로드 + 주기/백그라운드 자동저장
-            } else {
-                camera.onFrame = { pipeline.process($0, depth: $1, pose: nil) }
-                camera.start()
-            }
+            // 카메라/AR보다 Gemma를 먼저 — GPU init이 Metal을 선점해야 함
             gemma.load()
             speechIn.prepare()
             let boot = useAR
                 ? "Vision assist started with scene mesh. Hold the button to ask."
                 : "Vision assist started. Hold the button to ask."
             SpeechOut.shared.say(boot, priority: 1)
+            // 로드가 너무 길면 센서는 나중에라도 킴
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+                startSensorsIfNeeded()
+            }
+        }
+        .onChange(of: gemma.state) { _, new in
+            switch new {
+            case .ready, .failed: startSensorsIfNeeded()
+            default: break
+            }
+        }
+    }
+
+    private func startSensorsIfNeeded() {
+        guard !sensorsStarted else { return }
+        sensorsStarted = true
+        if useAR {
+            arCamera.onFrame = { pixel, depth, pos, fwd in
+                pipeline.process(pixel, depth: depth, pose: (pos, fwd))
+            }
+            arCamera.onStructures = { pipeline.processStructures($0) }
+            arCamera.start(withSavedMap: true)
+        } else {
+            camera.onFrame = { pipeline.process($0, depth: $1, pose: nil) }
+            camera.start()
         }
     }
 
     private var backendStatus: String {
         switch gemma.state {
         case .idle: return "LLM: —"
-        case .loading: return "LLM: loading…"
+        case .loading: return "LLM: loading… (GPU first)"
         case .failed: return "LLM: failed"
         case .ready, .busy:
             let name = gemma.backendName.isEmpty ? "?" : gemma.backendName
+            if name == "CPU", !gemma.backendNote.isEmpty {
+                return "LLM backend: CPU — \(gemma.backendNote)"
+            }
             return "LLM backend: \(name)"
         }
     }
