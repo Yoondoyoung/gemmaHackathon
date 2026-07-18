@@ -25,6 +25,9 @@ def run_loop(camera, shared, stop_flag):
     print("[depth] 준비 완료")
     while not stop_flag.is_set():
         t0 = time.time()
+        if shared.get("llm_busy"):     # Gemma 응답 중엔 GPU 양보
+            stop_flag.wait(0.5)
+            continue
         frame = camera.latest()
         if frame is not None:
             try:

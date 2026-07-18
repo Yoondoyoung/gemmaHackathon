@@ -112,7 +112,7 @@ def main():
                 return
             florence = fl
             print("[florence] 준비 완료")
-            run_loop(camera, scene, on_new_texts, stop, fl)
+            run_loop(camera, scene, on_new_texts, stop, fl, shared)
         threading.Thread(target=start_florence, daemon=True).start()
 
     def handle_question(question):
@@ -130,6 +130,7 @@ def main():
                         pass
             t0 = time.time()
             snap = scene.snapshot_json()
+            shared["llm_busy"] = True    # Gemma 생성 중엔 Florence/depth가 GPU 양보
             if _is_empty_seat_question(question):
                 # 문장 단위 TTS 대신 전체 답을 한 번만 발화
                 answer = gemma_client.ask_streaming(question, snap, lambda _s: None)
@@ -147,6 +148,7 @@ def main():
             scene.set_caption(None)
             state["last_qa"] = f"{time.time()-t0:.1f}s"
         finally:
+            shared["llm_busy"] = False
             state["busy"] = False
 
     def ask_async(question):

@@ -26,7 +26,8 @@ class Florence:
                                 return_tensors="pt").to(self.device)
         gen = self.model.generate(
             input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"],
-            max_new_tokens=128, num_beams=1, do_sample=False,
+            max_new_tokens=config.FLORENCE_MAX_TOKENS, num_beams=1,
+            do_sample=False,
             early_stopping=False)   # num_beams=1과 충돌하는 기본값 경고 억제
         raw = self.processor.batch_decode(gen, skip_special_tokens=False)[0]
         return self.processor.post_process_generation(
@@ -59,10 +60,14 @@ class Florence:
                              "<MORE_DETAILED_CAPTION>")).strip()
 
 
-def run_loop(camera, scene, on_new_texts, stop_flag, florence):
-    """FLORENCE_PERIOD_SEC마다 최신 프레임 1장 OCR → 처음 보는 텍스트는 콜백."""
+def run_loop(camera, scene, on_new_texts, stop_flag, florence, shared=None):
+    """FLORENCE_PERIOD_SEC마다 최신 프레임 1장 OCR → 처음 보는 텍스트는 콜백.
+    Gemma 응답 생성 중(llm_busy)에는 사이클을 스킵 — GPU 경합 방지."""
     while not stop_flag.is_set():
         t0 = time.time()
+        if shared is not None and shared.get("llm_busy"):
+            stop_flag.wait(0.5)
+            continue
         frame = camera.latest()
         if frame is not None:
             try:
