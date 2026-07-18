@@ -68,12 +68,12 @@ final class SpeechIn: ObservableObject {
 
         let session = AVAudioSession.sharedInstance()
         do {
-            // `.measurement`는 입력 계측용이라 이후 TTS 출력이 작아진다.
             try session.setCategory(.playAndRecord, mode: .default,
                                     options: [.defaultToSpeaker, .allowBluetooth])
             try session.setActive(true, options: .notifyOthersOnDeactivation)
             try session.overrideOutputAudioPort(.speaker)
         } catch {
+            SpeechOut.shared.setMicOpen(false)   // 실패 시 경고 억제 플래그 잔존 방지
             state = .unavailable("Audio session failed: \(error.localizedDescription)")
             return
         }
@@ -98,6 +98,7 @@ final class SpeechIn: ObservableObject {
             try audioEngine.start()
         } catch {
             input.removeTap(onBus: 0)
+            SpeechOut.shared.setMicOpen(false)
             state = .unavailable("Mic start failed: \(error.localizedDescription)")
             return
         }

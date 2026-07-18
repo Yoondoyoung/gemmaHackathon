@@ -182,6 +182,7 @@ struct ContentView: View {
                             //    (GPS 아님. YOLO 탐지 위치를 LiDAR+포즈로 저장해 둔 것)
                             if Pipeline.isFindBackQuestion(question),
                                let guide = pipeline.guideBack(for: question) {
+                                SpeechOut.shared.unmuteForSpeech()
                                 SpeechOut.shared.say(guide, priority: 1)
                             // 2) 회상 질문("아까 지나쳤어?")이면 에피소드 기억으로 답변
                             } else if Pipeline.isRecallQuestion(question) {
@@ -196,6 +197,7 @@ struct ContentView: View {
                                     question: "GOAL: \(goal.spoken)",
                                     image: "none",
                                     scene: pipeline.snapshotJSON())
+                                SpeechOut.shared.unmuteForSpeech()
                                 SpeechOut.shared.say(
                                     "Looking for the \(goal.spoken). "
                                     + "I'll tell you when I see a sign.", priority: 1)

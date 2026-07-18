@@ -175,9 +175,10 @@ final class GemmaChat: ObservableObject {
         askTask = Task { [weak self] in
             guard let self else { return }
             defer {
+                // 취소돼도 경고 억제는 반드시 해제 (영구 무음 버그 방지)
+                SpeechOut.shared.endAnswerStream()
                 if !Task.isCancelled {
                     self.state = .ready
-                    SpeechOut.shared.endAnswerStream()
                     print("[gemma] ready again")
                 }
             }
