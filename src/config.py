@@ -7,8 +7,8 @@ YOLO_WEIGHTS = "yolo26n.pt"          # 로드 실패 시 YOLO_FALLBACK
 YOLO_FALLBACK = "yolo11n.pt"
 YOLO_CONF = 0.4
 YOLO_DEVICE = "mps"
-YOLO_MAX_FPS = 15                    # 경고용으론 충분. 60fps 풀가동은 GPU 경합(프레임드랍
-                                     # 체감 원인)과 팬리스 M1 발열만 키운다 — 실측 진단
+YOLO_MAX_FPS = 30                    # 60fps 풀가동은 GPU 경합(프레임드랍 체감 원인)과
+                                     # 팬리스 M1 발열만 키운다 — 실측 진단
 
 # 경고/추적 대상 클래스 (COCO) — 이외는 SceneState에도 안 넣음 (노이즈 억제)
 TRACK_LABELS = {"person", "chair", "bicycle", "car", "dog", "backpack",
@@ -34,6 +34,8 @@ DEPTH_PERIOD_SEC = 1.5
 DEPTH_NEAR_M = 2.5                   # 이내면 near — 보행속도 1.2m/s 기준 ~2초 여유
 DEPTH_MED_M = 5.0                    # 이내면 medium
 CLOSING_RATE = 0.15                  # bbox_h_ratio 초당 증가율 → approaching
+DEPTH_CLOSING_MPS = 0.5              # depth 감소율(m/s) — 정면에서 이 속도로 접근 중이면 경고
+DEPTH_CLOSING_MAX_M = 5.0            # 이 거리 안에서 접근 중일 때만 (너무 먼 접근은 무시)
 GONE_AFTER_MISSES = 5                # 연속 미검출 프레임 수 → 객체 제거
 
 # 의자 점유: person–chair IoU 또는 person 하단 중심이 chair 안이면 occupied

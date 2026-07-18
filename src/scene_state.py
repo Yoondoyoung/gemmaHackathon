@@ -101,11 +101,21 @@ class SceneState:
             for d in detections:
                 tid = d["track_id"]
                 seen.add(tid)
-                hist = self._history.setdefault(tid, deque(maxlen=60))
-                hist.append((now, d["bbox_h_ratio"]))
-                old = next(((t, r) for t, r in hist if now - t >= 0.8), None)
+                hist = self._history.setdefault(tid, deque(maxlen=120))
+                hist.append((now, d["bbox_h_ratio"], d.get("depth_m")))
+                # 접근 판정 1: bbox 크기 증가율 (0.8초 창)
+                old = next(((t, r) for t, r, _ in hist if now - t >= 0.8), None)
                 closing = old is not None and \
                     (d["bbox_h_ratio"] - old[1]) / (now - old[0]) > config.CLOSING_RATE
+                # 접근 판정 2: depth 감소율 (2초 창 — depth는 1.5초 주기 갱신이라 창을 길게)
+                # 실측 근거: 정면 접근자는 2.5m 안에 들어오기 전에 옆으로 비켜가므로
+                # '가깝다'가 아니라 '거리가 줄고 있다'를 봐야 정면 접근을 조기에 잡는다.
+                dm = d.get("depth_m")
+                if not closing and dm is not None and dm <= config.DEPTH_CLOSING_MAX_M:
+                    d_old = next(((t, dep) for t, _, dep in hist
+                                  if dep is not None and now - t >= 2.0), None)
+                    closing = d_old is not None and \
+                        (d_old[1] - dm) / (now - d_old[0]) > config.DEPTH_CLOSING_MPS
                 depth_m = d.get("depth_m")
                 dist = _dist_of(d["label"], d["bbox_h_ratio"],
                                 d.get("bottom", 1.0), depth_m)
