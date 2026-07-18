@@ -73,6 +73,7 @@ TTS_VOICE = "Samantha"
 
 SYSTEM_PROMPT_PATH = "prompts/system_prompt.txt"
 GOAL_PROMPT_PATH = "prompts/goal_prompt.txt"
+GEMMA_FRAME_DUMP_DIR = "gemma_frames"   # b 질문 시 Gemma에 전달된 장면 스냅샷 저장
 
 POS_SPOKEN = {"left": "on your left", "center": "ahead of you",
               "right": "on your right"}

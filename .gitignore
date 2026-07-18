@@ -24,3 +24,6 @@ clips/
 
 # 로그
 nohup.out
+
+# b 질문 시 Gemma에 전달된 프레임 스냅샷
+gemma_frames/
