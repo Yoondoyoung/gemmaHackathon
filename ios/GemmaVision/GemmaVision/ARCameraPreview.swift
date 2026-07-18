@@ -178,6 +178,20 @@ struct ARCameraPreview: UIViewRepresentable {
             overlay.sublayers?.forEach { $0.removeFromSuperlayer() }
             let viewSize = bounds.size
             guard viewSize.width > 1, viewSize.height > 1 else { return }
+
+            // 구조물 인식 밴드(가로 중앙 1/3) 가이드 — 좌우 벽 무시 구간 시각화
+            let band = CAShapeLayer()
+            let path = UIBezierPath()
+            let x1 = viewSize.width / 3
+            let x2 = viewSize.width * 2 / 3
+            path.move(to: CGPoint(x: x1, y: 0)); path.addLine(to: CGPoint(x: x1, y: viewSize.height))
+            path.move(to: CGPoint(x: x2, y: 0)); path.addLine(to: CGPoint(x: x2, y: viewSize.height))
+            band.path = path.cgPath
+            band.strokeColor = UIColor.white.withAlphaComponent(0.35).cgColor
+            band.lineWidth = 1
+            band.lineDashPattern = [6, 4]
+            overlay.addSublayer(band)
+
             for b in boxes {
                 let v = b.visionBox
                 let metadataRect = CGRect(x: 1 - v.maxY, y: 1 - v.maxX,

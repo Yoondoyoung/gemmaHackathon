@@ -6,6 +6,7 @@ import Combine
 import CoreVideo
 import Foundation
 import simd
+import UIKit
 
 struct StructureHit: Equatable {
     let label: String   // wall | door | window | floor
@@ -27,11 +28,12 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "ar.camera")
     private var lastStructureAt = Date.distantPast
     private static let structurePeriod: TimeInterval = 0.25
-    /// 정면 판정 반각(도). 실내 벽/문 스팸 억제 — 정말 코앞만 center.
-    private static let centerHalfAngleDeg: Double = 9
-    private static let sideHalfAngleDeg: Double = 28
-    /// 정면 center일 때 가로 오프셋 상한(m). 각도만으로는 가까운 측면 벽이 섞임.
-    private static let centerMaxLateralM: Double = 0.35
+    /// 화면 가로 3등분 — 중앙 밴드만 구조물(벽/문/창/바닥) 인식. 좌·우는 무시.
+    private static let screenCenterMinX: CGFloat = 1.0 / 3.0
+    private static let screenCenterMaxX: CGFloat = 2.0 / 3.0
+    /// 세로도 가장자리(천장/발밑) 제외
+    private static let screenCenterMinY: CGFloat = 0.15
+    private static let screenCenterMaxY: CGFloat = 0.85
     /// 장애물 클래스 (seat/table은 YOLO와 중복 → 제외).
     private static let obstacleClasses: Set<ARMeshClassification> = [.wall, .door, .window]
     /// 이동 가능 바닥.
@@ -82,10 +84,11 @@ private extension ARCameraManager {
         guard !meshes.isEmpty else { return [] }
 
         let worldToCamera = simd_inverse(frame.camera.transform)
-        let centerTan = tan(centerHalfAngleDeg * .pi / 180)
-        let sideTan = tan(sideHalfAngleDeg * .pi / 180)
+        // 프리뷰와 같은 세로 화면 기준으로 투영 (가로 3등분 중앙만 사용)
+        let viewport = CGSize(width: 390, height: 844)
+        let orientation = UIInterfaceOrientation.portrait
 
-        // 장애물: 라벨별 최근접 / 바닥: 정면 최원(이동 가능 거리)
+        // 장애물: 라벨별 최근접 / 바닥: 중앙 밴드 최원
         var bestObstacle: [String: StructureHit] = [:]
         var bestFloor: StructureHit?
 
@@ -110,52 +113,38 @@ private extension ARCameraManager {
                 let depth = Double(-p4.z)
                 guard depth > 0.25, depth < Config.mediumMeters + 1.5 else { continue }
 
-                if isObstacle {
-                    // 거의 정면을 향한 면만 (옆벽·비스듬한 문틀 제외)
-                    if let nCam = faceNormalCamera(faceIndex: faceIndex, geometry: geometry,
-                                                   anchor: anchor.transform,
-                                                   worldToCamera: worldToCamera),
-                       nCam.z < 0.55 {
-                        continue
-                    }
-                } else {
-                    // 바닥: 세계 좌표에서 위쪽을 향하는 면만
+                // ★ 화면 3등분: 좌·우에 투영되면 벽/문/창/바닥 전부 무시
+                let projected = frame.camera.projectPoint(
+                    centerWorld, orientation: orientation, viewportSize: viewport)
+                let nx = projected.x / viewport.width
+                let ny = projected.y / viewport.height
+                guard nx >= screenCenterMinX, nx <= screenCenterMaxX,
+                      ny >= screenCenterMinY, ny <= screenCenterMaxY
+                else { continue }
+
+                if isFloor {
                     if let nWorld = faceNormalWorld(faceIndex: faceIndex, geometry: geometry,
                                                     anchor: anchor.transform),
-                       nWorld.y < 0.65 {
+                       abs(nWorld.y) < 0.65 {
                         continue
                     }
-                }
-
-                let lateral = abs(Double(p4.x))
-                let xRatio = lateral / depth
-                let pos: String
-                // center: 좁은 시야각 + 절대 가로 오프셋(가까운 옆벽 차단)
-                if xRatio <= centerTan && lateral <= centerMaxLateralM {
-                    pos = "center"
-                } else if xRatio <= sideTan {
-                    pos = p4.x < 0 ? "left" : "right"
-                } else {
+                    if bestFloor == nil || depth > bestFloor!.meters {
+                        bestFloor = StructureHit(label: "floor", meters: depth, pos: "center")
+                    }
                     continue
                 }
 
-                if isFloor {
-                    // 정면 바닥이 얼마나 멀리까지 이어지는지 (이동 가능 거리)
-                    guard pos == "center" else { continue }
-                    if bestFloor == nil || depth > bestFloor!.meters {
-                        bestFloor = StructureHit(label: "floor", meters: depth, pos: pos)
-                    }
+                // 옆을 향한 면(복도 옆벽이 프레임 중앙에 살짝 걸치는 경우) 추가 차단
+                if let nCam = faceNormalCamera(faceIndex: faceIndex, geometry: geometry,
+                                               anchor: anchor.transform,
+                                               worldToCamera: worldToCamera),
+                   abs(nCam.z) < abs(nCam.x) {
                     continue
                 }
 
                 let label = labelName(cls)
-                let hit = StructureHit(label: label, meters: depth, pos: pos)
-                if let prev = bestObstacle[label] {
-                    let prevCenter = prev.pos == "center"
-                    let newCenter = hit.pos == "center"
-                    if prevCenter && !newCenter { continue }
-                    if prevCenter == newCenter && prev.meters <= hit.meters { continue }
-                }
+                let hit = StructureHit(label: label, meters: depth, pos: "center")
+                if let prev = bestObstacle[label], prev.meters <= hit.meters { continue }
                 bestObstacle[label] = hit
             }
         }

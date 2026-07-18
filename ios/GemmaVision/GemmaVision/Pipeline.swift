@@ -31,10 +31,10 @@ enum Config {
     static let nearBottomMaxY: CGFloat = 0.25    // Vision 좌표(원점 좌하단): minY < 0.25 = 바닥 접점
     static let nearMeters: Double = 2.5          // LiDAR 실측 기준 (Mac판 depth 튜닝값)
     static let mediumMeters: Double = 5.0
-    /// ARKit 구조물 경고 — 실내는 벽/문이 항상 보이므로 가깝고 정면일 때만
+    /// ARKit 구조물 경고 — 실내 옆벽 스팸 방지: 벽은 거의 코앞+정면만
     static let structureNearMeters: Double = 1.4   // 문/창 경고 거리
-    static let wallAlertMeters: Double = 1.1       // 벽은 더 가까이 (막다른 곳)
-    static let structureAlertCooldown: TimeInterval = 10  // 구조물 라벨 재경고 간격
+    static let wallAlertMeters: Double = 0.9       // 막다른 벽만 (옆벽 제외는 스캔 단계에서)
+    static let structureAlertCooldown: TimeInterval = 12  // 구조물 라벨 재경고 간격
     /// 바닥이 이 거리 이상 이어지고 앞에 막힘이 없으면 "path clear" 안내
     static let pathClearMinFloorM: Double = 1.5
     static let pathClearCooldown: TimeInterval = 12
