@@ -18,10 +18,19 @@ class Event:
     label: str
     pos: str         # left | center | right
     track_id: int
+    depth_m: float = None   # 미터 단위 실측 깊이 (depth 워커 활성 시)
 
 
-def _dist_of(label: str, h_ratio: float) -> str:
-    if h_ratio >= config.NEAR_THRESH.get(label, config.NEAR_THRESH["default"]):
+def _dist_of(label: str, h_ratio: float, bottom: float = 1.0,
+             depth_m: float = None) -> str:
+    """depth_m(미터, Depth Anything)이 있으면 그걸로 판정 — 가장 정확.
+    없으면 bbox 휴리스틱 폴백: 크기 + 바닥 접점(멀리 있는 대형 물체는 화면 중간에 뜸)."""
+    if depth_m is not None:
+        if depth_m <= config.DEPTH_NEAR_M:
+            return "near"
+        return "medium" if depth_m <= config.DEPTH_MED_M else "far"
+    if h_ratio >= config.NEAR_THRESH.get(label, config.NEAR_THRESH["default"]) \
+            and bottom >= config.NEAR_BOTTOM_MIN:
         return "near"
     if h_ratio >= config.MED_THRESH.get(label, config.MED_THRESH["default"]):
         return "medium"
@@ -97,20 +106,26 @@ class SceneState:
                 old = next(((t, r) for t, r in hist if now - t >= 0.8), None)
                 closing = old is not None and \
                     (d["bbox_h_ratio"] - old[1]) / (now - old[0]) > config.CLOSING_RATE
-                dist = _dist_of(d["label"], d["bbox_h_ratio"])
+                depth_m = d.get("depth_m")
+                dist = _dist_of(d["label"], d["bbox_h_ratio"],
+                                d.get("bottom", 1.0), depth_m)
                 prev = self._objects.get(tid)
                 if prev is None:
                     status = "new"
                     if dist == "near":
-                        events.append(Event("new_near", d["label"], d["pos"], tid))
+                        events.append(Event("new_near", d["label"], d["pos"],
+                                            tid, depth_m))
                 else:
                     if dist == "near" and prev["dist"] != "near":
-                        events.append(Event("entered_near", d["label"], d["pos"], tid))
+                        events.append(Event("entered_near", d["label"], d["pos"],
+                                            tid, depth_m))
                     if closing and prev["status"] != "approaching":
-                        events.append(Event("approaching", d["label"], d["pos"], tid))
+                        events.append(Event("approaching", d["label"], d["pos"],
+                                            tid, depth_m))
                     status = "approaching" if closing else "seen"
                 entry = {"label": d["label"], "pos": d["pos"],
                          "bbox_h_ratio": d["bbox_h_ratio"],
+                         "depth_m": depth_m,
                          "dist": dist, "status": status, "misses": 0}
                 if "bbox" in d:
                     entry["bbox"] = d["bbox"]
@@ -163,6 +178,8 @@ class SceneState:
                 item = {"track_id": tid, "label": o["label"], "pos": o["pos"],
                         "dist": o["dist"], "status": o["status"],
                         "bbox_h_ratio": round(o["bbox_h_ratio"], 2)}
+                if o.get("depth_m") is not None:
+                    item["depth_m"] = round(o["depth_m"], 1)   # 스키마 선택 필드 (팀 합의)
                 if o["label"] == "chair" and "occupied" in o:
                     item["occupied"] = o["occupied"]
                 objs.append(item)

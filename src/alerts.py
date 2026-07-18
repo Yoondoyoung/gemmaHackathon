@@ -22,9 +22,13 @@ class AlertEngine:
                 continue
             self._last_by_label[e.label] = now
             self._last_global = now
+            dist_phrase = ""
+            if e.depth_m is not None:                 # 미터 실측이 있으면 포함
+                m = max(1, round(e.depth_m))
+                dist_phrase = f", {m} meter{'s' if m > 1 else ''}"
             if e.kind in ("new_near", "entered_near"):
-                return [f"{e.label} ahead, close"]
-            return [f"{e.label} approaching"]
+                return [f"{e.label} ahead{dist_phrase or ', close'}"]
+            return [f"{e.label} approaching{dist_phrase}"]
         return []
 
 

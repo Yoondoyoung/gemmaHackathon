@@ -46,9 +46,11 @@ class Florence:
             if len(content) < 2 or not any(c.isalnum() for c in content):
                 continue
             cx = sum(quad[0::2]) / 4
-            w = img.size[0]
+            w, h = img.size
             pos = "left" if cx < w / 3 else ("center" if cx < 2 * w / 3 else "right")
-            items.append({"content": content, "pos": pos})
+            ys = quad[1::2]
+            items.append({"content": content, "pos": pos,
+                          "h_ratio": (max(ys) - min(ys)) / h})  # 알림 가치 판정용
         return items
 
     def caption(self, frame_bgr) -> str:

@@ -14,8 +14,23 @@ TRACK_LABELS = {"person", "chair", "bicycle", "car", "dog", "backpack",
                 "bus", "truck", "motorcycle", "traffic light", "stop sign"}
 
 # 거리 임계값: bbox_h / frame_h. 리허설에서 실측 캘리브레이션.
-NEAR_THRESH = {"person": 0.60, "chair": 0.45, "default": 0.50}
-MED_THRESH = {"person": 0.30, "chair": 0.25, "default": 0.28}
+# 대형 물체(테이블/소파/차량)는 멀어도 bbox가 커서 임계값을 높게 잡는다.
+NEAR_THRESH = {"person": 0.60, "chair": 0.50, "bicycle": 0.55,
+               "dining table": 0.80, "couch": 0.80, "bench": 0.70,
+               "car": 0.70, "bus": 0.85, "truck": 0.85, "default": 0.55}
+MED_THRESH = {"person": 0.30, "chair": 0.28,
+              "dining table": 0.50, "couch": 0.50, "car": 0.40,
+              "bus": 0.55, "truck": 0.55, "default": 0.30}
+NEAR_BOTTOM_MIN = 0.75               # near 판정 추가 조건: bbox 하단이 프레임 하단 25% 안
+                                     # (멀리 있는 대형 물체는 화면 중간에 떠 있음)
+
+# 미터 단위 깊이 (Depth Anything V2 metric-indoor, 실측 192ms/frame @MPS)
+# 깊이 맵이 있으면 bbox 휴리스틱 대신 이걸로 near/medium/far 판정 + 경고에 미터 포함
+DEPTH_ENABLED = True
+DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
+DEPTH_PERIOD_SEC = 1.0
+DEPTH_NEAR_M = 1.5                   # 이내면 near
+DEPTH_MED_M = 3.5                    # 이내면 medium
 CLOSING_RATE = 0.15                  # bbox_h_ratio 초당 증가율 → approaching
 GONE_AFTER_MISSES = 5                # 연속 미검출 프레임 수 → 객체 제거
 
@@ -32,6 +47,14 @@ ANNOUNCE_NEW_SIGNS = True            # 새 표지판 최초 1회 알림
 ANNOUNCE_MAX_WORDS = 3               # 이보다 긴 텍스트는 저장만 (OCR 잡음 낭독 방지)
 ANNOUNCE_MAX_CHARS = 20
 ANNOUNCE_MIN_INTERVAL = 4.0          # 표지판 알림 전역 최소 간격
+# 알림 가치 판정: 내비게이션 어휘에 있거나, 화면에서 충분히 크게 보이는 텍스트만 발화.
+# (작은 글자 = 모니터 브랜드/제품 라벨 등 → 저장만, Q&A·목표 매칭에는 사용)
+NAV_SIGN_WORDS = {"exit", "restroom", "toilet", "toilets", "wc", "men", "women",
+                  "ladies", "gents", "gate", "elevator", "lift", "stairs",
+                  "escalator", "entrance", "emergency", "information", "info",
+                  "cafeteria", "cafe", "parking", "reception", "registration",
+                  "push", "pull", "caution", "danger", "wet", "floor"}
+SIGN_MIN_H_RATIO = 0.05              # 텍스트 높이/프레임 높이 — 이 이상이면 '눈에 띄는 표지판'
 TEXT_SIMILARITY = 0.75               # OCR 지터 dedupe 임계 (difflib ratio)
 TEXT_REANNOUNCE_GAP = 10.0           # 시야에서 이 시간 이상 사라졌다 재등장하면 재알림
 GOAL_ENABLED = True                  # 목표 기억 (표지판 자동 매칭)

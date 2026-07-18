@@ -35,10 +35,24 @@ def _is_empty_seat_question(question: str) -> bool:
     return any(w in q for w in EMPTY_SEAT_WORDS)
 
 
+def worth_announcing(item) -> bool:
+    """내비게이션 어휘이거나 화면에서 크게 보이는 텍스트만 발화 가치 있음.
+    (브랜드 로고/제품 라벨 같은 작은 잡글자는 저장만 — Q&A·목표 매칭에는 사용됨)"""
+    content = item["content"]
+    if len(content.split()) > config.ANNOUNCE_MAX_WORDS \
+            or len(content) > config.ANNOUNCE_MAX_CHARS:
+        return False
+    words = {w.strip(".,:;!?<>→←-").lower() for w in content.split()}
+    if words & config.NAV_SIGN_WORDS:
+        return True
+    return item.get("h_ratio", 0) >= config.SIGN_MIN_H_RATIO
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", help="웹캠 대신 비디오 파일 (테스트 하네스)")
     ap.add_argument("--no-florence", action="store_true", help="OCR 비활성 (P0만)")
+    ap.add_argument("--no-depth", action="store_true", help="미터 깊이 비활성")
     ap.add_argument("--mute", action="store_true", help="TTS를 print로만")
     args = ap.parse_args()
 
@@ -59,6 +73,11 @@ def main():
                      args=(camera, scene, AlertEngine(), speaker, stop, shared)
                      ).start()
 
+    if config.DEPTH_ENABLED and not args.no_depth:
+        from src.vision import depth_worker
+        threading.Thread(target=depth_worker.run_loop, daemon=True,
+                         args=(camera, shared, stop)).start()
+
     last_announce = [0.0]
 
     def on_new_texts(fresh):
@@ -74,10 +93,7 @@ def main():
                 speaker.say(f"Found it — a sign for {it['content']}, {spoken_pos}", 1)
                 state["goal"] = None
                 continue
-            if not config.ANNOUNCE_NEW_SIGNS:
-                continue
-            if len(it["content"].split()) > config.ANNOUNCE_MAX_WORDS \
-                    or len(it["content"]) > config.ANNOUNCE_MAX_CHARS:
+            if not config.ANNOUNCE_NEW_SIGNS or not worth_announcing(it):
                 continue
             if time.time() - last_announce[0] < config.ANNOUNCE_MIN_INTERVAL:
                 continue
