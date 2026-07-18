@@ -96,3 +96,18 @@ if __name__ == "__main__":
                   lambda s: print(f"  문장: {s}"))
     print("goal:", extract_goal("I'm looking for the restroom"))
     print("goal(없어야 함):", extract_goal("Is it safe here?"))
+
+    chairs = json.dumps({"timestamp": 0, "objects": [
+        {"track_id": 10, "label": "chair", "pos": "left", "dist": "near",
+         "status": "seen", "bbox_h_ratio": 0.5, "occupied": False},
+        {"track_id": 11, "label": "chair", "pos": "center", "dist": "near",
+         "status": "seen", "bbox_h_ratio": 0.48, "occupied": True},
+        {"track_id": 12, "label": "chair", "pos": "right", "dist": "medium",
+         "status": "seen", "bbox_h_ratio": 0.3, "occupied": False},
+        {"track_id": 13, "label": "person", "pos": "center", "dist": "near",
+         "status": "seen", "bbox_h_ratio": 0.55}],
+        "texts": []})
+    print("Q: Where can I find an empty seat?")
+    ask_streaming("Where can I find an empty seat?", chairs,
+                  lambda s: print(f"  문장: {s}"))
+

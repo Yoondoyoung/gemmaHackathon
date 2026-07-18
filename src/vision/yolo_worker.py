@@ -55,6 +55,7 @@ def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
             pos = "left" if cx < w / 3 else ("center" if cx < 2 * w / 3 else "right")
             detections.append({"track_id": int(box.id), "label": label,
                                "pos": pos, "bbox_h_ratio": (y2 - y1) / h,
+                               "bbox": [x1, y1, x2, y2],
                                "bottom": y2 / h,
                                "depth_m": _bbox_depth(depth_entry, x1, y1, x2, y2, w, h),
                                "_xy": (int(x1), int(y1))})

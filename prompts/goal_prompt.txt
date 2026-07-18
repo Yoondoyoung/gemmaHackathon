@@ -4,8 +4,12 @@ If the user states a place or thing they are looking for, trying to find, or ask
 
 If they are not looking for anything specific (small talk, safety questions, descriptions), output exactly: NONE
 
+Empty seat / where to sit questions are answered from camera objects, not signs — output exactly: NONE
+
 Examples:
 "I'm looking for the restroom" -> restroom, toilet, bathroom, wc, men, women, ladies, gents
 "Where is the exit?" -> exit, way out, emergency exit
+"Where can I sit?" -> NONE
+"Is there an empty seat?" -> NONE
 "Is it safe to cross?" -> NONE
 "What's in front of me?" -> NONE

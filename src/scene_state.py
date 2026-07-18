@@ -37,16 +37,62 @@ def _dist_of(label: str, h_ratio: float, bottom: float = 1.0,
     return "far"
 
 
+def _iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _person_bottom_in_chair(person_bbox, chair_bbox) -> bool:
+    px1, py1, px2, py2 = person_bbox
+    cx1, cy1, cx2, cy2 = chair_bbox
+    bx, by = (px1 + px2) / 2, py2
+    return cx1 <= bx <= cx2 and cy1 <= by <= cy2
+
+
+def _chair_occupied(chair_bbox, person_bboxes) -> bool:
+    for pb in person_bboxes:
+        if _iou(chair_bbox, pb) >= config.CHAIR_OCCUPIED_IOU:
+            return True
+        if config.CHAIR_PERSON_BOTTOM_IN_CHAIR and \
+                _person_bottom_in_chair(pb, chair_bbox):
+            return True
+    return False
+
+
+def _compute_occupancy(objects: dict) -> None:
+    """chair 객체에 occupied 플래그 설정 (내부 bbox 사용). in-place."""
+    persons = [o["bbox"] for o in objects.values()
+               if o["label"] == "person" and o.get("bbox")]
+    for o in objects.values():
+        if o["label"] != "chair":
+            o.pop("occupied", None)
+            continue
+        if not o.get("bbox"):
+            o["occupied"] = False
+            continue
+        o["occupied"] = _chair_occupied(o["bbox"], persons)
+
+
 class SceneState:
     def __init__(self):
         self._lock = threading.Lock()
-        self._objects = {}      # tid -> {label,pos,dist,status,bbox_h_ratio,misses}
+        self._objects = {}      # tid -> {label,pos,dist,status,bbox_h_ratio,misses,bbox?,occupied?}
         self._history = {}      # tid -> deque[(t, h_ratio)] 최근 이력 (접근율 계산)
         self._texts = []        # [{content,pos,ts}]
         self._caption = None    # 장면 묘사 질문 시에만 일시 설정
 
     def update_objects(self, detections) -> list:
-        """detections: [{"track_id","label","pos","bbox_h_ratio"}] — 매 프레임 호출.
+        """detections: [{"track_id","label","pos","bbox_h_ratio", optional "bbox"}].
         상태 전이가 발생한 객체만 Event로 반환."""
         now = time.time()
         events = []
@@ -77,16 +123,20 @@ class SceneState:
                         events.append(Event("approaching", d["label"], d["pos"],
                                             tid, depth_m))
                     status = "approaching" if closing else "seen"
-                self._objects[tid] = {"label": d["label"], "pos": d["pos"],
-                                      "bbox_h_ratio": d["bbox_h_ratio"],
-                                      "depth_m": depth_m,
-                                      "dist": dist, "status": status, "misses": 0}
+                entry = {"label": d["label"], "pos": d["pos"],
+                         "bbox_h_ratio": d["bbox_h_ratio"],
+                         "depth_m": depth_m,
+                         "dist": dist, "status": status, "misses": 0}
+                if "bbox" in d:
+                    entry["bbox"] = d["bbox"]
+                self._objects[tid] = entry
             for tid in list(self._objects):
                 if tid not in seen:
                     self._objects[tid]["misses"] += 1
                     if self._objects[tid]["misses"] >= config.GONE_AFTER_MISSES:
                         del self._objects[tid]
                         self._history.pop(tid, None)
+            _compute_occupancy(self._objects)
         return events
 
     def update_texts(self, items) -> list:
@@ -125,12 +175,14 @@ class SceneState:
         with self._lock:
             objs = []
             for tid, o in self._objects.items():
-                obj = {"track_id": tid, "label": o["label"], "pos": o["pos"],
-                       "dist": o["dist"], "status": o["status"],
-                       "bbox_h_ratio": round(o["bbox_h_ratio"], 2)}
+                item = {"track_id": tid, "label": o["label"], "pos": o["pos"],
+                        "dist": o["dist"], "status": o["status"],
+                        "bbox_h_ratio": round(o["bbox_h_ratio"], 2)}
                 if o.get("depth_m") is not None:
-                    obj["depth_m"] = round(o["depth_m"], 1)   # 스키마 선택 필드 (팀 합의)
-                objs.append(obj)
+                    item["depth_m"] = round(o["depth_m"], 1)   # 스키마 선택 필드 (팀 합의)
+                if o["label"] == "chair" and "occupied" in o:
+                    item["occupied"] = o["occupied"]
+                objs.append(item)
             texts = sorted((t for t in self._texts
                             if now - t["ts"] <= config.TEXT_TTL_SEC),
                            key=lambda t: t["ts"], reverse=True)
@@ -162,4 +214,45 @@ if __name__ == "__main__":
     assert any(k == "approaching" for _, k in fired), "approaching 미발생"
     assert any(k == "entered_near" for _, k in fired), "entered_near 미발생"
     assert fresh == [{"content": "WC", "pos": "left"}], "텍스트 dedupe 실패"
+
+    # occupancy: person–chair 겹침 → occupied
+    scene2 = SceneState()
+    scene2.update_objects([
+        {"track_id": 10, "label": "chair", "pos": "left", "bbox_h_ratio": 0.4,
+         "bbox": [100, 200, 200, 350]},
+        {"track_id": 11, "label": "person", "pos": "left", "bbox_h_ratio": 0.5,
+         "bbox": [110, 150, 190, 340]},
+    ])
+    snap2 = json.loads(scene2.snapshot_json())
+    chairs2 = {o["track_id"]: o for o in snap2["objects"] if o["label"] == "chair"}
+    assert chairs2[10]["occupied"] is True, "겹친 chair가 empty로 나옴"
+    assert "bbox" not in chairs2[10], "snapshot에 bbox가 노출됨"
+    assert all("occupied" not in o for o in snap2["objects"] if o["label"] != "chair")
+
+    # occupancy: chair만 → empty
+    scene3 = SceneState()
+    scene3.update_objects([
+        {"track_id": 20, "label": "chair", "pos": "center", "bbox_h_ratio": 0.35,
+         "bbox": [250, 200, 350, 340]},
+    ])
+    snap3 = json.loads(scene3.snapshot_json())
+    assert snap3["objects"][0]["occupied"] is False, "빈 chair가 occupied로 나옴"
+
+    # occupancy: 혼재 — left empty, center occupied, right empty
+    scene4 = SceneState()
+    scene4.update_objects([
+        {"track_id": 30, "label": "chair", "pos": "left", "bbox_h_ratio": 0.4,
+         "bbox": [50, 200, 140, 340]},
+        {"track_id": 31, "label": "chair", "pos": "center", "bbox_h_ratio": 0.4,
+         "bbox": [250, 200, 340, 340]},
+        {"track_id": 32, "label": "chair", "pos": "right", "bbox_h_ratio": 0.4,
+         "bbox": [450, 200, 540, 340]},
+        {"track_id": 33, "label": "person", "pos": "center", "bbox_h_ratio": 0.5,
+         "bbox": [260, 140, 330, 330]},
+    ])
+    snap4 = json.loads(scene4.snapshot_json())
+    by_id = {o["track_id"]: o for o in snap4["objects"] if o["label"] == "chair"}
+    assert by_id[30]["occupied"] is False and by_id[32]["occupied"] is False
+    assert by_id[31]["occupied"] is True, "앉아있는 center chair가 empty"
+    print("occupancy PASS")
     print("PASS")

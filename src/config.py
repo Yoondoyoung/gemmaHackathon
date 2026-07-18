@@ -34,6 +34,10 @@ DEPTH_MED_M = 3.5                    # 이내면 medium
 CLOSING_RATE = 0.15                  # bbox_h_ratio 초당 증가율 → approaching
 GONE_AFTER_MISSES = 5                # 연속 미검출 프레임 수 → 객체 제거
 
+# 의자 점유: person–chair IoU 또는 person 하단 중심이 chair 안이면 occupied
+CHAIR_OCCUPIED_IOU = 0.15
+CHAIR_PERSON_BOTTOM_IN_CHAIR = True
+
 ALERT_COOLDOWN_SEC = 5.0             # 같은 track_id 재경고 금지
 ALERT_GLOBAL_INTERVAL = 2.0          # 전체 경고 최소 간격
 
