@@ -16,14 +16,14 @@ enum Config {
         "bicycle", "car", "motorcycle", "bus", "truck", "train",
         "traffic light", "stop sign", "fire hydrant", "parking meter",
         "chair", "couch", "bench", "bed", "dining table", "toilet",
-        "potted plant", "tv", "refrigerator", "oven", "microwave", "sink",
+        "potted plant", "refrigerator", "oven", "microwave", "sink",
         "backpack", "handbag", "suitcase", "umbrella", "cell phone",
         "laptop", "keyboard", "mouse", "remote", "book", "bottle", "cup",
         "skateboard", "clock", "vase"]
     static let nearThresh: [String: CGFloat] = [
         "person": 0.60, "chair": 0.50, "bicycle": 0.55, "dining table": 0.80,
         "couch": 0.80, "bench": 0.70, "bed": 0.85, "car": 0.70, "bus": 0.85,
-        "truck": 0.85, "train": 0.85, "tv": 0.55, "refrigerator": 0.80,
+        "truck": 0.85, "train": 0.85, "refrigerator": 0.80,
         "oven": 0.55, "sink": 0.50, "toilet": 0.50, "laptop": 0.35,
         "bottle": 0.30, "cup": 0.25, "cell phone": 0.20, "book": 0.30,
         "clock": 0.30, "vase": 0.40, "umbrella": 0.55, "skateboard": 0.35,
