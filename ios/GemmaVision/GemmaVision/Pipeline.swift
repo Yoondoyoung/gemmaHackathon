@@ -38,6 +38,8 @@ enum Config {
     /// 바닥이 이 거리 이상 이어지고 앞에 막힘이 없으면 "path clear" 안내
     static let pathClearMinFloorM: Double = 1.5
     static let pathClearCooldown: TimeInterval = 12
+    /// 갈림길/측면 통로 안내 (같은 형태 재알림 쿨다운)
+    static let forkCooldown: TimeInterval = 18
     static let confMin: Float = 0.4
     static let alertCooldown: TimeInterval = 5    // YOLO 라벨별 (ID churn 대응)
     static let alertGlobalGap: TimeInterval = 2
@@ -138,10 +140,11 @@ final class Pipeline: ObservableObject {
     private let queue = DispatchQueue(label: "pipeline.queue")
     // Gemma 스냅샷용 미니 SceneState (Mac판 스키마 축소 이식)
     private var lastObjects: [(label: String, pos: String, dist: String)] = []
-    // ARKit Scene Geometry (벽/문/창) — YOLO 보완, 룰베이스 경고만
+    // ARKit Scene Geometry (벽/문/창/갈림길) — YOLO 보완, 룰베이스 경고만
     private let structureLock = NSLock()
     private var lastStructures: [StructureHit] = []
     private var structureStatus = ""
+    private var lastForkPos: String?   // rising-edge 감지용 (both/left/right)
     // Q&A용 최신 프레임 (JPEG). 탐지 루프에서 스로틀 갱신.
     private let jpegLock = NSLock()
     private var latestJPEG: Data?
@@ -201,9 +204,9 @@ final class Pipeline: ObservableObject {
         }
     }
 
-    /// ARKit 메쉬 분류 — 벽/문/창 장애 경고 + 바닥 이동가능 안내 (LLM 금지).
+    /// ARKit 메쉬 — 벽/문/창 경고 + 갈림길 + 직진 가능 안내 (LLM 금지).
     func processStructures(_ hits: [StructureHit]) {
-        let hint = hits.prefix(4).map {
+        let hint = hits.prefix(5).map {
             String(format: "%@ %@ %.1fm", $0.label, $0.pos, $0.meters)
         }.joined(separator: " · ")
         structureLock.lock()
@@ -213,11 +216,11 @@ final class Pipeline: ObservableObject {
 
         guard !SpeechOut.shared.suppressingWarnings else { return }
 
-        // 1) 장애물 경고 — 정면(center) + 가까운 거리만 (floor 제외)
+        // 1) 장애물 경고 — 정면 + 가까운 거리만
         let candidates = hits.filter { hit in
             guard hit.pos == "center" else { return false }
             switch hit.label {
-            case "floor": return false
+            case "floor", "fork": return false
             case "wall": return hit.meters <= Config.wallAlertMeters
             case "door", "window": return hit.meters <= Config.structureNearMeters
             default: return false
@@ -235,10 +238,43 @@ final class Pipeline: ObservableObject {
             speak("\(hit.label) ahead, \(rounded) meter\(rounded > 1 ? "s" : "")",
                   priority: 0)
             logObjectPassed(hit.label, pos: hit.pos)
-            return   // 장애물이 있으면 path-clear는 이 틱에 생략
+            return
         }
 
-        // 2) 바닥이 이어지고 앞에 막힘이 없으면 이동 가능 안내
+        // 2) 갈림길 / 측면 통로 — 새로 나타날 때만 (rising edge)
+        if let fork = hits.first(where: { $0.label == "fork" }) {
+            let prev = lastForkPos
+            lastForkPos = fork.pos
+            let appeared = prev != fork.pos   // nil→left, left→both 등
+            if appeared {
+                let now = Date()
+                let key = "fork_\(fork.pos)"
+                if now.timeIntervalSince(lastAlertByLabel[key] ?? .distantPast)
+                    >= Config.forkCooldown,
+                   now.timeIntervalSince(lastGlobalAlert) >= Config.alertGlobalGap {
+                    lastAlertByLabel[key] = now
+                    lastGlobalAlert = now
+                    let phrase: String
+                    switch fork.pos {
+                    case "both":
+                        phrase = "Fork ahead — paths on your left and right"
+                    case "left":
+                        phrase = "Opening on your left"
+                    case "right":
+                        phrase = "Opening on your right"
+                    default:
+                        phrase = "Path splits ahead"
+                    }
+                    speak(phrase, priority: 1)
+                    logEpisode("fork \(fork.pos)", pos: fork.pos == "both" ? "center" : fork.pos)
+                    return
+                }
+            }
+        } else {
+            lastForkPos = nil
+        }
+
+        // 3) 직진 바닥이 이어지고 앞에 막힘이 없으면 path clear
         guard let floor = hits.first(where: { $0.label == "floor" && $0.pos == "center" }),
               floor.meters >= Config.pathClearMinFloorM else { return }
         let blocked = hits.contains {

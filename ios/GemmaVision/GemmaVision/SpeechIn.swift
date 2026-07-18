@@ -62,8 +62,9 @@ final class SpeechIn: ObservableObject {
         self.onFinal = onFinal
         partial = ""
 
-        // TTS가 마이크/세션을 잡고 있으면 인식이 깨지므로 끊는다.
+        // 재생 중 안내/답변을 즉시 끊고, 듣는 동안 새 발화도 막는다.
         SpeechOut.shared.stop()
+        SpeechOut.shared.setMicOpen(true)
 
         let session = AVAudioSession.sharedInstance()
         do {
@@ -146,6 +147,7 @@ final class SpeechIn: ObservableObject {
             audioEngine.stop()
         }
         audioEngine.inputNode.removeTap(onBus: 0)
+        SpeechOut.shared.setMicOpen(false)
         // 마이크 세션을 닫고 TTS용 playback으로 돌려 볼륨을 복구한다.
         let session = AVAudioSession.sharedInstance()
         try? session.setActive(false, options: .notifyOthersOnDeactivation)

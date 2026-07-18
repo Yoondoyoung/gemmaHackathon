@@ -15,6 +15,7 @@ final class GemmaChat: ObservableObject {
     @Published var state: State = .idle
     @Published var lastAnswer = ""
     private var engine: Engine?
+    private var askTask: Task<Void, Never>?
 
     /// 맥 `python tools/prompt_log_server.py` 가 출력한 IP로 맞출 것 (같은 Wi‑Fi).
     /// 예: "10.220.8.129"  — 비우면 맥 전송 생략, Xcode 콘솔 print만.
@@ -26,9 +27,9 @@ final class GemmaChat: ObservableObject {
     friend beside them — plain spoken English, not a report or a computer log. \
     Look at the CAMERA IMAGE first — that is the primary source of truth for what \
     is ahead.     Optional detector_hints JSON may list object labels/distances and \
-    ARKit structures (wall/door/window/floor with depth_m). path_clear=true \
-    means open floor ahead — you may say they can keep walking. Hints may be \
-    incomplete; never answer from hints alone when an image is present. \
+    ARKit structures (wall/door/window/floor/fork with depth_m). path_clear=true \
+    means open floor ahead. fork means a side opening or split (pos left/right/both). \
+    Hints may be incomplete; never answer from hints alone when an image is present. \
     Rules: \
     1. Describe what you SEE in the image to answer the question. \
     2. Use detector_hints only to refine distance/side if they match the image. \
@@ -155,7 +156,7 @@ final class GemmaChat: ObservableObject {
         let imageKB = hasImage ? (imageJPEG!.count + 512) / 1024 : 0
         let imageDesc = hasImage ? "yes \(imageKB)KB JPEG" : "none"
 
-        guard state == .ready, let engine else {
+        guard state == .ready || state == .busy, let engine else {
             print("[gemma] ask skipped — state=\(state)")
             Self.postPromptLogToMac(
                 question: "SKIPPED (\(String(describing: state))): \(question)",
@@ -163,23 +164,25 @@ final class GemmaChat: ObservableObject {
                 scene: scene)
             return
         }
+        interrupt()   // 이전 답변·TTS가 있으면 끊고 새 질문
         state = .busy
-        SpeechOut.shared.beginAnswer()   // 답변 구간 진입 — 경고가 답을 끊지 못하게
+        SpeechOut.shared.beginAnswer()
         print("""
         [gemma →] Q: \(question)
         image: \(imageDesc)
         detector_hints: \(scene)
         """)
-        Task {
+        askTask = Task { [weak self] in
+            guard let self else { return }
             defer {
-                state = .ready
-                SpeechOut.shared.endAnswerStream()   // 스트림 끝(발화 완료는 별도)
-                print("[gemma] ready again")
+                if !Task.isCancelled {
+                    self.state = .ready
+                    SpeechOut.shared.endAnswerStream()
+                    print("[gemma] ready again")
+                }
             }
             do {
                 let conversation = try await engine.createConversation()
-                // 이미지 → 질문 → hints 순. hints를 "Current scene"으로 부르면
-                // 모델이 JSON만 보고 답하는 편향이 생긴다.
                 var parts: [Content] = []
                 if let imageJPEG, !imageJPEG.isEmpty {
                     parts.append(.imageData(imageJPEG))
@@ -194,10 +197,12 @@ final class GemmaChat: ObservableObject {
                 let message = Message(contents: parts)
                 var buffer = "", full = ""
                 for try await chunk in conversation.sendMessageStream(message) {
+                    try Task.checkCancellation()
                     let piece = chunk.toString
                     buffer += piece
                     full += piece
                     while let idx = buffer.firstIndex(where: { ".!?".contains($0) }) {
+                        try Task.checkCancellation()
                         let sentence = String(buffer[...idx])
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         buffer = String(buffer[buffer.index(after: idx)...])
@@ -206,14 +211,26 @@ final class GemmaChat: ObservableObject {
                         }
                     }
                 }
+                try Task.checkCancellation()
                 let tail = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !tail.isEmpty { SpeechOut.shared.say(tail, priority: 1) }
                 lastAnswer = full.trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch is CancellationError {
+                print("[gemma] interrupted")
             } catch {
+                guard !Task.isCancelled else { return }
                 lastAnswer = "error: \(error)"
                 SpeechOut.shared.say("Sorry, I couldn't process that.", priority: 1)
             }
         }
+    }
+
+    /// PTT 등으로 현재 생성·발화를 즉시 중단하고 ready로 돌린다.
+    func interrupt() {
+        askTask?.cancel()
+        askTask = nil
+        SpeechOut.shared.stop()
+        if state == .busy { state = .ready }
     }
 
     /// 맥 터미널 로그 서버로 fire-and-forget POST (실패해도 Q&A는 계속).

@@ -127,13 +127,12 @@ struct ContentView: View {
         }
     }
 
+    /// ready뿐 아니라 busy(답변 중)에도 PTT 가능 — 누르면 음성·생성을 interrupt.
     private var pushToTalkEnabled: Bool {
-        gemma.state == .ready && speechIn.canListen && !gemmaBusy
-    }
-
-    private var gemmaBusy: Bool {
-        if case .busy = gemma.state { return true }
-        return false
+        switch gemma.state {
+        case .ready, .busy: return speechIn.canListen
+        default: return false
+        }
     }
 
     private var pushToTalkButton: some View {
@@ -155,6 +154,8 @@ struct ContentView: View {
                         guard !isPressingTalk else { return }
                         guard pushToTalkEnabled, speechIn.state == .idle else { return }
                         isPressingTalk = true
+                        // 답변 TTS·Gemma 생성 중이면 먼저 끊고 듣기 시작
+                        gemma.interrupt()
                         speechIn.begin { question in
                             // 1) 회상 질문("아까 지나쳤어?")이면 에피소드 기억으로 답변
                             //    — 목표 판별보다 먼저 (목적지 단어가 들어있어도 회상 우선)

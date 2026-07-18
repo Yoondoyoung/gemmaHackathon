@@ -9,9 +9,9 @@ import simd
 import UIKit
 
 struct StructureHit: Equatable {
-    let label: String   // wall | door | window | floor
-    let meters: Double  // 장애물=최근접 / floor=전방 바닥이 이어지는 거리
-    let pos: String     // left | center | right
+    let label: String   // wall | door | window | floor | fork
+    let meters: Double  // 장애물=최근접 / floor·fork=바닥이 이어지는 거리
+    let pos: String     // left | center | right | both(fork)
 }
 
 final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
@@ -28,15 +28,18 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "ar.camera")
     private var lastStructureAt = Date.distantPast
     private static let structurePeriod: TimeInterval = 0.25
-    /// 화면 가로 3등분 — 중앙 밴드만 구조물(벽/문/창/바닥) 인식. 좌·우는 무시.
+    /// 화면 가로 3등분 — 벽/문/창은 중앙만. 바닥은 좌·중·우(갈림길).
     private static let screenCenterMinX: CGFloat = 1.0 / 3.0
     private static let screenCenterMaxX: CGFloat = 2.0 / 3.0
-    /// 세로도 가장자리(천장/발밑) 제외
     private static let screenCenterMinY: CGFloat = 0.15
     private static let screenCenterMaxY: CGFloat = 0.85
+    /// 측면 통로: 카메라 좌표 |x|가 이 이상이어야 "옆으로 열린 바닥"
+    /// (직진 복도 바닥이 화면 좌우에 보이는 것과 구분).
+    private static let sideBranchLateralM: Double = 0.65
+    private static let sideBranchMinDepthM: Double = 1.2
+    private static let sideBranchMaxDepthM: Double = 4.0
     /// 장애물 클래스 (seat/table은 YOLO와 중복 → 제외).
     private static let obstacleClasses: Set<ARMeshClassification> = [.wall, .door, .window]
-    /// 이동 가능 바닥.
     private static let walkClasses: Set<ARMeshClassification> = [.floor]
 
     func start() {
@@ -84,13 +87,14 @@ private extension ARCameraManager {
         guard !meshes.isEmpty else { return [] }
 
         let worldToCamera = simd_inverse(frame.camera.transform)
-        // 프리뷰와 같은 세로 화면 기준으로 투영 (가로 3등분 중앙만 사용)
         let viewport = CGSize(width: 390, height: 844)
         let orientation = UIInterfaceOrientation.portrait
 
-        // 장애물: 라벨별 최근접 / 바닥: 중앙 밴드 최원
         var bestObstacle: [String: StructureHit] = [:]
-        var bestFloor: StructureHit?
+        // 바닥: 밴드별 최원 거리 (center=직진 / left·right=옆으로 열린 통로)
+        var floorCenterM: Double?
+        var floorLeftM: Double?
+        var floorRightM: Double?
 
         for anchor in meshes {
             let geometry = anchor.geometry
@@ -109,18 +113,20 @@ private extension ARCameraManager {
                 else { continue }
 
                 let p4 = worldToCamera * SIMD4<Float>(centerWorld, 1)
-                guard p4.z < 0 else { continue }   // ARKit: -Z = 전방
+                guard p4.z < 0 else { continue }
                 let depth = Double(-p4.z)
                 guard depth > 0.25, depth < Config.mediumMeters + 1.5 else { continue }
 
-                // ★ 화면 3등분: 좌·우에 투영되면 벽/문/창/바닥 전부 무시
                 let projected = frame.camera.projectPoint(
                     centerWorld, orientation: orientation, viewportSize: viewport)
                 let nx = projected.x / viewport.width
                 let ny = projected.y / viewport.height
-                guard nx >= screenCenterMinX, nx <= screenCenterMaxX,
-                      ny >= screenCenterMinY, ny <= screenCenterMaxY
-                else { continue }
+                guard ny >= screenCenterMinY, ny <= screenCenterMaxY else { continue }
+
+                let band: String
+                if nx < screenCenterMinX { band = "left" }
+                else if nx > screenCenterMaxX { band = "right" }
+                else { band = "center" }
 
                 if isFloor {
                     if let nWorld = faceNormalWorld(faceIndex: faceIndex, geometry: geometry,
@@ -128,20 +134,34 @@ private extension ARCameraManager {
                        abs(nWorld.y) < 0.65 {
                         continue
                     }
-                    if bestFloor == nil || depth > bestFloor!.meters {
-                        bestFloor = StructureHit(label: "floor", meters: depth, pos: "center")
+                    if band == "center" {
+                        if floorCenterM == nil || depth > floorCenterM! {
+                            floorCenterM = depth
+                        }
+                    } else {
+                        // 측면 통로: 화면 좌/우 + 실제 옆으로 벌어진 바닥만
+                        // (직진 복도 바닥이 프레임 좌우에 비치는 것 제외)
+                        let lateral = abs(Double(p4.x))
+                        guard lateral >= sideBranchLateralM,
+                              depth >= sideBranchMinDepthM,
+                              depth <= sideBranchMaxDepthM else { continue }
+                        if band == "left" {
+                            if floorLeftM == nil || depth > floorLeftM! { floorLeftM = depth }
+                        } else {
+                            if floorRightM == nil || depth > floorRightM! { floorRightM = depth }
+                        }
                     }
                     continue
                 }
 
-                // 옆을 향한 면(복도 옆벽이 프레임 중앙에 살짝 걸치는 경우) 추가 차단
+                // 벽/문/창: 중앙 밴드만
+                guard band == "center" else { continue }
                 if let nCam = faceNormalCamera(faceIndex: faceIndex, geometry: geometry,
                                                anchor: anchor.transform,
                                                worldToCamera: worldToCamera),
                    abs(nCam.z) < abs(nCam.x) {
                     continue
                 }
-
                 let label = labelName(cls)
                 let hit = StructureHit(label: label, meters: depth, pos: "center")
                 if let prev = bestObstacle[label], prev.meters <= hit.meters { continue }
@@ -150,7 +170,33 @@ private extension ARCameraManager {
         }
 
         var out = Array(bestObstacle.values)
-        if let floor = bestFloor { out.append(floor) }
+        if let m = floorCenterM {
+            out.append(StructureHit(label: "floor", meters: m, pos: "center"))
+        }
+        if let m = floorLeftM {
+            out.append(StructureHit(label: "floor", meters: m, pos: "left"))
+        }
+        if let m = floorRightM {
+            out.append(StructureHit(label: "floor", meters: m, pos: "right"))
+        }
+        // 갈림길: 좌·우 측면 바닥이 동시에, 또는 한쪽에만 열린 통로
+        let left = floorLeftM != nil
+        let right = floorRightM != nil
+        if left || right {
+            let pos: String
+            let meters: Double
+            if left && right {
+                pos = "both"
+                meters = min(floorLeftM!, floorRightM!)
+            } else if left {
+                pos = "left"
+                meters = floorLeftM!
+            } else {
+                pos = "right"
+                meters = floorRightM!
+            }
+            out.append(StructureHit(label: "fork", meters: meters, pos: pos))
+        }
         return out.sorted { $0.meters < $1.meters }
     }
 
