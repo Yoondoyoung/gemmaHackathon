@@ -37,9 +37,14 @@ def _is_empty_seat_question(question: str) -> bool:
 def worth_announcing(item) -> bool:
     """내비게이션 어휘이거나 화면에서 크게 보이는 텍스트만 발화 가치 있음.
     (브랜드 로고/제품 라벨 같은 작은 잡글자는 저장만 — Q&A·목표 매칭에는 사용됨)"""
+    import re
     content = item["content"]
     if len(content.split()) > config.ANNOUNCE_MAX_WORDS \
             or len(content) > config.ANNOUNCE_MAX_CHARS:
+        return False
+    # 알파벳이 있거나 짧은 순수 숫자(건물 번호 등)만 — "0.0.00.00" 같은 잡음 차단
+    if not any(c.isalpha() for c in content) \
+            and not re.fullmatch(r"\d{1,4}", content.strip()):
         return False
     words = {w.strip(".,:;!?<>→←-").lower() for w in content.split()}
     if words & config.NAV_SIGN_WORDS:
