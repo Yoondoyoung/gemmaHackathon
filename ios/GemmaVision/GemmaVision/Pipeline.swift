@@ -633,6 +633,7 @@ final class Pipeline: ObservableObject {
             if matchGoal(words: words, content: content, pos: pos) {
                 rememberSign(content: content, screenPos: pos, box: obs.boundingBox,
                              depth: depth)
+                logEpisode("\(content) sign", pos: pos)   // Found it도 회상 로그에 남김
                 continue
             }
             let isNav = !words.isDisjoint(with: Config.navWords)
@@ -749,6 +750,48 @@ final class Pipeline: ObservableObject {
         return Config.findBackPhrases.contains { lower.contains($0) }
     }
 
+    /// "Did I pass the restroom / my backpack?" → 에피소드·공간기억으로 예/아니오 (Gemma 없이).
+    /// 구체적 대상이 질문에 없으면 nil → Gemma 회상 경로로 넘김.
+    func answerRecall(for question: String) -> String? {
+        let lower = question.lowercased()
+        guard Self.questionHasRecallSubject(lower) else { return nil }
+
+        let now = Date()
+        // 1) 에피소드 로그 (표지판 알림·지나친 물체)
+        episodeLock.lock()
+        let epMatch = episodes
+            .filter { now.timeIntervalSince($0.t) <= Config.episodeMaxAgeSec }
+            .filter { Self.subjectMatches(question: lower, subject: $0.what) }
+            .max(by: { $0.t < $1.t })
+        episodeLock.unlock()
+        if let ep = epMatch {
+            let age = Int(now.timeIntervalSince(ep.t).rounded())
+            let noun = Self.spokenNoun(from: ep.what)
+            return "Yes — we passed \(noun) \(spoken(ep.pos)) \(Self.agePhrase(age))."
+        }
+
+        // 2) AR 공간 기억 (알림 없이도 remember된 표지판/물체)
+        memoryLock.lock()
+        objectMemories.removeAll {
+            now.timeIntervalSince($0.seenAt) > Config.objectMemoryMaxAgeSec
+        }
+        let memMatch = objectMemories
+            .filter { memoryMatches(question: lower, mem: $0) }
+            .max(by: { $0.seenAt < $1.seenAt })
+        memoryLock.unlock()
+        if let mem = memMatch {
+            let age = Int(now.timeIntervalSince(mem.seenAt).rounded())
+            let noun = mem.isSign ? "a \(mem.label) sign" : "a \(mem.label)"
+            return "Yes — I saw \(noun) \(Self.agePhrase(age))."
+        }
+
+        // 대상은 알아들었는데 기록이 없음
+        if let named = Self.namedRecallSubject(in: lower) {
+            return "No, I don't remember passing \(named) recently."
+        }
+        return "I don't remember that yet."
+    }
+
     /// 질문에서 찾을 라벨을 뽑아, 기억된 월드 좌표 기준으로 돌아갈 방향을 말함.
     func guideBack(for question: String) -> String? {
         guard let pose = lastPose else {
@@ -788,10 +831,7 @@ final class Pipeline: ObservableObject {
         let ahead = simd_dot(flat, forward)
         let side = simd_dot(flat, right)
         let meters = max(1, Int(dist.rounded()))
-        let agePhrase: String
-        if age < 15 { agePhrase = "a moment ago" }
-        else if age < 60 { agePhrase = "about \(age) seconds ago" }
-        else { agePhrase = "about \(max(1, age / 60)) minute\(age >= 120 ? "s" : "") ago" }
+        let agePhrase = Self.agePhrase(age)
 
         let turn: String
         if ahead < -0.35 {
@@ -813,31 +853,90 @@ final class Pipeline: ObservableObject {
 
     private func memoryMatches(question q: String, mem: ObjectMemory) -> Bool {
         let label = mem.label.lowercased()
-        if q.contains(label) { return true }
+        if Self.subjectMatches(question: q, subject: label) { return true }
         if mem.isSign {
-            // "exit sign", "the restroom" 등 — 표지판 단어가 질문에 있으면 매칭
-            let tokens = label.components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { $0.count >= 2 }
-            if tokens.contains(where: { q.contains($0) }) { return true }
-            if q.contains("sign"), tokens.contains(where: { Config.navWords.contains($0) }) {
+            // "the sign"만 물으면 nav 표지판이면 매칭
+            if q.contains("sign"),
+               label.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .contains(where: { Config.navWords.contains($0) }) {
                 return true
             }
-            return false
         }
         return synonymMatch(q, label: label)
     }
 
-    private func synonymMatch(_ q: String, label: String) -> Bool {
-        let aliases: [String: [String]] = [
+    /// "RESTROOM sign" / "WC" ↔ 질문 "restroom" / "bathroom" 등 동의어 포함 매칭.
+    private static func subjectMatches(question q: String, subject: String) -> Bool {
+        let sub = subject.lowercased()
+        let subTokens = Set(sub.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 })
+        let qTokens = Set(q.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 })
+        if !subTokens.isDisjoint(with: qTokens) { return true }
+        if q.contains(sub), sub.count >= 3 { return true }
+
+        // destinationSynonyms: restroom ↔ toilet/wc/bathroom …
+        for (_, syns) in Config.destinationSynonyms {
+            let set = Set(syns)
+            let qHit = !qTokens.isDisjoint(with: set) || syns.contains(where: { q.contains($0) })
+            let sHit = !subTokens.isDisjoint(with: set) || syns.contains(where: { sub.contains($0) })
+            if qHit && sHit { return true }
+        }
+        // YOLO 물체 별칭
+        let objectAliases: [String: [String]] = [
             "backpack": ["bag", "backpack", "rucksack"],
             "handbag": ["purse", "handbag", "bag"],
-            "cell phone": ["phone", "iphone", "cellphone", "cell phone"],
-            "laptop": ["laptop", "computer", "macbook"],
-            "bottle": ["bottle", "water"],
+            "cell phone": ["phone", "iphone", "cellphone"],
             "suitcase": ["suitcase", "luggage"],
         ]
-        let keys = aliases[label] ?? [label]
-        return keys.contains { q.contains($0) }
+        for (canon, syns) in objectAliases {
+            let set = Set(syns + [canon])
+            if !qTokens.isDisjoint(with: set), !subTokens.isDisjoint(with: set) { return true }
+            if syns.contains(where: { q.contains($0) }),
+               sub.contains(canon) || syns.contains(where: { sub.contains($0) }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 회상 질문에 구체적 대상(목적지/물체)이 있는지.
+    private static func questionHasRecallSubject(_ q: String) -> Bool {
+        namedRecallSubject(in: q) != nil
+            || Config.cocoNames.contains(where: { q.contains($0) })
+            || ["bag", "phone", "purse", "luggage", "sign"].contains(where: { q.contains($0) })
+    }
+
+    private static func namedRecallSubject(in q: String) -> String? {
+        for (name, syns) in Config.destinationSynonyms {
+            if syns.contains(where: { q.contains($0) }) { return "the \(name)" }
+        }
+        for name in Config.cocoNames where q.contains(name) {
+            return name == "backpack" || name == "handbag" || name == "suitcase"
+                ? "your \(name)" : "a \(name)"
+        }
+        if q.contains("bag") { return "your bag" }
+        if q.contains("phone") { return "your phone" }
+        if q.contains("sign") { return "that sign" }
+        return nil
+    }
+
+    private static func spokenNoun(from what: String) -> String {
+        let w = what.trimmingCharacters(in: .whitespacesAndNewlines)
+        if w.hasPrefix("a ") || w.hasPrefix("the ") { return w }
+        if w.lowercased().contains("sign") { return "the \(w)" }
+        return w
+    }
+
+    private static func agePhrase(_ age: Int) -> String {
+        if age < 15 { return "just now" }
+        if age < 45 { return "a moment ago" }
+        if age < 90 { return "about a minute ago" }
+        return "a couple minutes ago"
+    }
+
+    private func synonymMatch(_ q: String, label: String) -> Bool {
+        Self.subjectMatches(question: q, subject: label)
     }
 
     private func recentHistoryJSON() -> String {

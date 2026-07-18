@@ -185,12 +185,18 @@ struct ContentView: View {
                                let guide = pipeline.guideBack(for: question) {
                                 SpeechOut.shared.unmuteForSpeech()
                                 SpeechOut.shared.say(guide, priority: 1)
-                            // 2) 회상 질문("아까 지나쳤어?")이면 에피소드 기억으로 답변
+                            // 2) "Did I pass the restroom / my bag?" → 에피소드·표지판 기억 (룰베이스)
+                            //    Gemma 우회: 동의어(restroom↔WC/toilet) 매칭 + Yes/No
+                            } else if Pipeline.isRecallQuestion(question),
+                                      let recall = pipeline.answerRecall(for: question) {
+                                SpeechOut.shared.unmuteForSpeech()
+                                SpeechOut.shared.say(recall, priority: 1)
+                            // 3) 모호한 회상만 Gemma + recent_history
                             } else if Pipeline.isRecallQuestion(question) {
                                 gemma.ask(question,
                                           scene: pipeline.snapshotJSON(includeHistory: true),
                                           imageJPEG: nil)
-                            // 3) 목적지 발화면 목표 설정 (표지판 교차검증)
+                            // 4) 목적지 발화면 목표 설정 (표지판 교차검증)
                             } else if let goal = Pipeline.extractGoal(from: question) {
                                 pipeline.setGoal(spoken: goal.spoken,
                                                  keywords: goal.keywords)
@@ -202,7 +208,7 @@ struct ContentView: View {
                                 SpeechOut.shared.say(
                                     "Looking for the \(goal.spoken). "
                                     + "I'll tell you when I see a sign.", priority: 1)
-                            // 4) 그 외 현재 장면 Q&A
+                            // 5) 그 외 현재 장면 Q&A
                             } else {
                                 let scene = pipeline.snapshotJSON()
                                 let jpeg = pipeline.frameJPEG()
