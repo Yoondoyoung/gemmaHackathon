@@ -28,6 +28,14 @@ ANNOUNCE_NEW_SIGNS = True            # 새 표지판 최초 1회 알림
 ANNOUNCE_MAX_WORDS = 3               # 이보다 긴 텍스트는 저장만 (OCR 잡음 낭독 방지)
 ANNOUNCE_MAX_CHARS = 20
 ANNOUNCE_MIN_INTERVAL = 4.0          # 표지판 알림 전역 최소 간격
+# 알림 가치 판정: 내비게이션 어휘에 있거나, 화면에서 충분히 크게 보이는 텍스트만 발화.
+# (작은 글자 = 모니터 브랜드/제품 라벨 등 → 저장만, Q&A·목표 매칭에는 사용)
+NAV_SIGN_WORDS = {"exit", "restroom", "toilet", "toilets", "wc", "men", "women",
+                  "ladies", "gents", "gate", "elevator", "lift", "stairs",
+                  "escalator", "entrance", "emergency", "information", "info",
+                  "cafeteria", "cafe", "parking", "reception", "registration",
+                  "push", "pull", "caution", "danger", "wet", "floor"}
+SIGN_MIN_H_RATIO = 0.05              # 텍스트 높이/프레임 높이 — 이 이상이면 '눈에 띄는 표지판'
 TEXT_SIMILARITY = 0.75               # OCR 지터 dedupe 임계 (difflib ratio)
 TEXT_REANNOUNCE_GAP = 10.0           # 시야에서 이 시간 이상 사라졌다 재등장하면 재알림
 GOAL_ENABLED = True                  # 목표 기억 (표지판 자동 매칭)
