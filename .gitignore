@@ -27,3 +27,4 @@ nohup.out
 
 # CoreML 익스포트 산출물 (SETUP.md 명령으로 재생성)
 *.mlpackage
+*.litertlm

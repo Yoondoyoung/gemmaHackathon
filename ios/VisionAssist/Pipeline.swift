@@ -37,10 +37,12 @@ final class Pipeline: ObservableObject {
     private var lastAlertByLabel: [String: Date] = [:]
     private var lastGlobalAlert = Date.distantPast
     private var lastOCRAt = Date.distantPast
-    private var signLastSeen: [String: Date] = [:]
+    private var signRecent: [String: (seen: Date, pos: String, content: String)] = [:]
     private var lastAnnounceAt = Date.distantPast
     private var processing = false
     private let queue = DispatchQueue(label: "pipeline.queue")
+    // Gemma 스냅샷용 미니 SceneState (Mac판 스키마 축소 이식)
+    private var lastObjects: [(label: String, pos: String, dist: String)] = []
 
     init() {
         // Xcode가 yolo11n.mlpackage에서 생성한 클래스 사용 (프로젝트에 모델 추가 필수)
@@ -79,13 +81,17 @@ final class Pipeline: ObservableObject {
 
     private func handleDetections(_ observations: [VNRecognizedObjectObservation]) {
         var summary: [String] = []
+        var objects: [(String, String, String)] = []
         for obs in observations {
             guard let top = obs.labels.first, top.confidence > Config.confMin,
                   Config.trackLabels.contains(top.identifier) else { continue }
             let box = obs.boundingBox           // 정규화, 원점 좌하단
             let pos = position(ofMidX: box.midX)
-            let near = box.height >= (Config.nearThresh[top.identifier] ?? Config.defaultNear)
+            let nearThresh = Config.nearThresh[top.identifier] ?? Config.defaultNear
+            let near = box.height >= nearThresh
                 && box.minY < Config.nearBottomMaxY   // 크기 + 바닥 접점 (Mac판 규칙)
+            let dist = near ? "near" : (box.height >= nearThresh * 0.5 ? "medium" : "far")
+            objects.append((top.identifier, pos, dist))
             summary.append("\(top.identifier) \(pos) h=\(String(format: "%.2f", box.height))")
             guard near, pos == "center" else { continue }
             let now = Date()
@@ -96,8 +102,27 @@ final class Pipeline: ObservableObject {
             lastGlobalAlert = now
             speak("\(top.identifier) ahead, close", priority: 0)
         }
+        lastObjects = objects
         let line = summary.isEmpty ? "clear" : summary.joined(separator: " | ")
         DispatchQueue.main.async { self.statusLine = line }
+    }
+
+    /// Gemma 프롬프트용 장면 스냅샷 (Mac판 SceneState.snapshot_json 축소 이식)
+    func snapshotJSON() -> String {
+        let objs = lastObjects.map {
+            "{\"label\": \"\($0.label)\", \"pos\": \"\($0.pos)\", \"dist\": \"\($0.dist)\"}"
+        }
+        let now = Date()
+        let texts = signRecent.values
+            .filter { now.timeIntervalSince($0.seen) < 30 }
+            .sorted { $0.seen > $1.seen }
+            .prefix(6)
+            .map {
+                "{\"content\": \"\($0.content)\", \"pos\": \"\($0.pos)\", " +
+                "\"age_sec\": \(Int(now.timeIntervalSince($0.seen)))}"
+            }
+        return "{\"objects\": [\(objs.joined(separator: ", "))], " +
+               "\"texts\": [\(texts.joined(separator: ", "))]}"
     }
 
     // MARK: - 표지판 (Vision OCR — 알림 가치 필터는 Mac판 worth_announcing 이식)
@@ -119,8 +144,9 @@ final class Pipeline: ObservableObject {
                     || content.allSatisfy({ $0.isNumber }) else { continue }
             let key = content.lowercased()
             let now = Date()
-            let seenBefore = signLastSeen[key]
-            signLastSeen[key] = now
+            let pos = position(ofMidX: obs.boundingBox.midX)
+            let seenBefore = signRecent[key]?.seen
+            signRecent[key] = (now, pos, content)
             if let seen = seenBefore,
                now.timeIntervalSince(seen) < Config.signRearmGap { continue }
             if now.timeIntervalSince(lastAnnounceAt) < Config.announceGap { continue }

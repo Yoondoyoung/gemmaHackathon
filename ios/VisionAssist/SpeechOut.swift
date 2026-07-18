@@ -8,17 +8,13 @@ final class SpeechOut: NSObject {
     private var currentPriority = 1
 
     func say(_ text: String, priority: Int = 1) {
-        if priority == 0 {
-            if synth.isSpeaking && currentPriority > 0 {
-                synth.stopSpeaking(at: .immediate)   // 안전 > 안내
-            }
-        } else if synth.isSpeaking {
-            return   // 발화 중 저순위 추가는 버림 (PoC 단순화)
+        if priority == 0, synth.isSpeaking, currentPriority > 0 {
+            synth.stopSpeaking(at: .immediate)   // 안전 > 안내 (대기열까지 비워짐)
         }
         currentPriority = priority
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.55   // 시각장애 사용자는 빠른 음성에 익숙
-        synth.speak(utterance)
+        synth.speak(utterance)   // AVSpeech가 자체적으로 순차 큐잉 (스트리밍 문장 대응)
     }
 }

@@ -5,6 +5,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var camera = CameraManager()
     @StateObject private var pipeline = Pipeline()
+    @StateObject private var gemma = GemmaChat()
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -16,17 +17,53 @@ struct ContentView: View {
                 Text(pipeline.lastSpoken)
                     .font(.headline)
                     .foregroundColor(.yellow)
+                Text(gemmaStatus)
+                    .font(.caption)
+                    .foregroundColor(.cyan)
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.black.opacity(0.5))
             .foregroundColor(.green)
+
+            VStack {
+                Spacer()
+                HStack(spacing: 12) {
+                    askButton("What's ahead of me?")
+                    askButton("Do you see any signs?")
+                }
+                .padding(.bottom, 24)
+            }
         }
         .onAppear {
             camera.onFrame = { pipeline.process($0) }
             camera.start()
+            gemma.load()
             SpeechOut.shared.say("Vision assist started", priority: 1)
         }
+    }
+
+    private var gemmaStatus: String {
+        switch gemma.state {
+        case .idle: return "gemma: idle"
+        case .loading: return "gemma: loading model…"
+        case .ready: return "gemma: ready — " + gemma.lastAnswer
+        case .busy: return "gemma: thinking…"
+        case .failed(let why): return "gemma: FAILED — \(why)"
+        }
+    }
+
+    private func askButton(_ question: String) -> some View {
+        Button(question) {
+            gemma.ask(question, scene: pipeline.snapshotJSON())
+        }
+        .font(.callout.bold())
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(gemma.state == .ready ? Color.blue : Color.gray)
+        .foregroundColor(.white)
+        .clipShape(Capsule())
+        .disabled(gemma.state != .ready)
     }
 }
 
