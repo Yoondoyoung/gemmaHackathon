@@ -59,7 +59,8 @@ final class GemmaChat: ObservableObject {
             // budget 미설정 → vision_280(~2400 patches, CPU 인코더 ~10초).
             // 70/140/280 중 택1. 11 Pro에선 140이 속도와 품질 타협점.
             ExperimentalFlags.optIntoExperimentalAPIs()
-            ExperimentalFlags.visualTokenBudget = 140
+            // 70이 가장 가볍고, 140은 품질↑·메모리/지연↑. 16 Pro 체감 여유를 위해 70.
+            ExperimentalFlags.visualTokenBudget = 70
 
             // 실기기: LLM은 Metal GPU. 비전 어댑터는 모델이 cpu constraint.
             // 시뮬레이터 GPU는 MPSGraph assertion으로 프로세스 사망 → CPU만.

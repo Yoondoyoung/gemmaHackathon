@@ -57,7 +57,8 @@ enum Config {
     static let confMin: Float = 0.4
     static let alertCooldown: TimeInterval = 5    // YOLO 라벨별 (ID churn 대응)
     static let alertGlobalGap: TimeInterval = 2
-    static let ocrPeriod: TimeInterval = 1.2      // 시도 빈도↑ — 전광판 깜빡임/글레어 사이 깨끗한 프레임 확보
+    static let ocrPeriod: TimeInterval = 2.0      // 16 Pro 열/메모리 여유 (이전이 1.2)
+    static let yoloMinInterval: TimeInterval = 1.0 / 30.0  // YOLO ≤30fps
     static let ocrMinConfidence: Float = 0.4      // 빛번짐으로 저하된 읽기도 살림 (nav/목표 필터가 잡음 차단)
     static let navWords: Set<String> = [
         "exit", "restroom", "toilet", "toilets", "wc", "men", "women",
@@ -148,10 +149,11 @@ final class Pipeline: ObservableObject {
     private var lastAlertByLabel: [String: Date] = [:]
     private var lastGlobalAlert = Date.distantPast
     private var lastOCRAt = Date.distantPast
+    private var lastYoloAt = Date.distantPast
     private var signRecent: [String: (seen: Date, pos: String, content: String)] = [:]
     private var lastAnnounceAt = Date.distantPast
     private var processing = false
-    private let queue = DispatchQueue(label: "pipeline.queue")
+    private let queue = DispatchQueue(label: "pipeline.queue", qos: .userInitiated)
     // Gemma 스냅샷용 미니 SceneState (Mac판 스키마 축소 이식)
     private var lastObjects: [(label: String, pos: String, dist: String)] = []
     // ARKit Scene Geometry (벽/문/창/갈림길) — YOLO 보완, 룰베이스 경고만
@@ -210,21 +212,23 @@ final class Pipeline: ObservableObject {
                  pose: (SIMD3<Float>, SIMD3<Float>)? = nil) {
         if let pose { lastPose = (pose.0, pose.1) }
         guard !processing, let model else { return }
+        let now = Date()
+        // YOLO 스로틀 — AR 프레임(60fps)마다 돌리면 중반부터 발열·드랍
+        guard now.timeIntervalSince(lastYoloAt) >= Config.yoloMinInterval else { return }
+        lastYoloAt = now
         processing = true
+        // depth/pixel은 비동기 전에 retain (다음 프레임에 버퍼 재사용될 수 있음)
         queue.async { [self] in
             defer { processing = false }
             refreshJPEGIfNeeded(pixelBuffer)
-            // YOLO는 원본 프레임에서 (탐지엔 전처리 불필요)
             let detect = VNCoreMLRequest(model: model)
             detect.imageCropAndScaleOption = .scaleFill
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                                 orientation: inputOrientation)
             try? handler.perform([detect])
-            // YOLO26 end2end: MultiArray [1,300,6] — VNRecognizedObjectObservation 아님.
             let dets = Self.decodeYOLO26(detect.results)
             handleDetections(dets, depth: depth)
 
-            // OCR은 별도 핸들러 — 빛번짐 완화 전처리된 이미지에서 (전광판/LED 대응)
             if Date().timeIntervalSince(lastOCRAt) > Config.ocrPeriod {
                 lastOCRAt = Date()
                 let ocr = Self.makeOCRRequest()
@@ -541,11 +545,10 @@ final class Pipeline: ObservableObject {
 
     private func refreshJPEGIfNeeded(_ pixelBuffer: CVPixelBuffer) {
         let now = Date()
-        guard now.timeIntervalSince(lastJPEGAt) >= 0.4 else { return }
+        guard now.timeIntervalSince(lastJPEGAt) >= 1.0 else { return }
         lastJPEGAt = now
-        // Gemma4 vision: 크면 vision_280 + ~2400 patches → CPU 인코더만 10초+.
-        // 448 전후면 vision_140 이하로 떨어져 체감이 훨씬 낫다.
-        guard let data = Self.jpegData(from: pixelBuffer, maxSide: 448,
+        // Gemma vision용 — 질문 직전에만 최신 프레임이면 충분. 자주 인코딩하면 발열↑
+        guard let data = Self.jpegData(from: pixelBuffer, maxSide: 384,
                                        orientation: inputOrientation) else { return }
         jpegLock.lock()
         latestJPEG = data

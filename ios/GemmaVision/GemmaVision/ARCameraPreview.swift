@@ -1,5 +1,5 @@
-// ARKit 카메라 프리뷰 + YOLO 박스 오버레이 + 분류별 컬러 메쉬(디버그).
-// 메쉬 색: floor=녹 / wall=주황 / door=파랑 / window=청록 / 기타=회색.
+// ARKit 카메라 프리뷰 + YOLO 박스 오버레이.
+// 메쉬 디버그: 켤 때만 희소·스로틀 렌더 (이전 전면 컬러 복제는 중반 버벅임 주원인).
 import ARKit
 import SceneKit
 import SwiftUI
@@ -8,8 +8,7 @@ import UIKit
 struct ARCameraPreview: UIViewRepresentable {
     let session: ARSession
     var boxes: [DetBox] = []
-    var showMesh: Bool = true
-    /// 센서 가로 버퍼 기준 (ARFrame.capturedImage와 동일 계열).
+    var showMesh: Bool = false
     var imageSize: CGSize = CGSize(width: 1920, height: 1440)
 
     func makeUIView(context: Context) -> PreviewView {
@@ -19,6 +18,7 @@ struct ARCameraPreview: UIViewRepresentable {
         view.delegate = context.coordinator
         view.automaticallyUpdatesLighting = false
         view.rendersCameraGrain = false
+        view.preferredFramesPerSecond = 30
         context.coordinator.showMesh = showMesh
         view.setMeshVisible(showMesh)
         return view
@@ -34,40 +34,55 @@ struct ARCameraPreview: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator: NSObject, ARSCNViewDelegate {
-        var showMesh = true
+        var showMesh = false
+        private var lastRebuildAt: [UUID: TimeInterval] = [:]
+        private static let rebuildMinGap: TimeInterval = 1.5
+        private static let faceStride = 12   // 12면 중 1만 그림
 
         func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
             guard showMesh, let mesh = anchor as? ARMeshAnchor else { return nil }
-            let node = SCNNode(geometry: Self.coloredGeometry(from: mesh))
+            let node = SCNNode()
             node.name = "mesh.\(mesh.identifier.uuidString)"
             node.renderingOrder = -1
+            node.geometry = Self.sparseGeometry(from: mesh)
+            lastRebuildAt[mesh.identifier] = Date().timeIntervalSince1970
             return node
         }
 
         func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode,
                       for anchor: ARAnchor) {
             guard let mesh = anchor as? ARMeshAnchor else { return }
-            if showMesh {
-                node.isHidden = false
-                node.geometry = Self.coloredGeometry(from: mesh)
-            } else {
+            if !showMesh {
                 node.isHidden = true
+                node.geometry = nil
+                return
             }
+            node.isHidden = false
+            let now = Date().timeIntervalSince1970
+            let last = lastRebuildAt[mesh.identifier] ?? 0
+            guard now - last >= Self.rebuildMinGap else { return }
+            lastRebuildAt[mesh.identifier] = now
+            node.geometry = Self.sparseGeometry(from: mesh)
         }
 
-        private static func coloredGeometry(from meshAnchor: ARMeshAnchor) -> SCNGeometry {
+        /// 면의 샘플 + 단색(분류별) — 전체 복제 대비 메모리 ~1/12.
+        private static func sparseGeometry(from meshAnchor: ARMeshAnchor) -> SCNGeometry {
             let geo = meshAnchor.geometry
             let vertices = geo.vertices
             let faces = geo.faces
             let faceCount = faces.count
             let per = faces.indexCountPerPrimitive
+            let stride = max(1, faceStride)
 
             var positions: [SCNVector3] = []
             var colors: [SIMD4<Float>] = []
-            positions.reserveCapacity(faceCount * per)
-            colors.reserveCapacity(faceCount * per)
+            let est = max(1, faceCount / stride) * per
+            positions.reserveCapacity(est)
+            colors.reserveCapacity(est)
 
-            for f in 0..<faceCount {
+            var f = 0
+            while f < faceCount {
+                defer { f += stride }
                 let c = color(for: classification(of: f, geometry: geo))
                 for k in 0..<per {
                     let idx = vertexIndex(face: f, corner: k, faces: faces)
@@ -75,6 +90,10 @@ struct ARCameraPreview: UIViewRepresentable {
                     positions.append(SCNVector3(v.x, v.y, v.z))
                     colors.append(c)
                 }
+            }
+            let triCount = positions.count / 3
+            guard triCount > 0 else {
+                return SCNGeometry()
             }
 
             let posSrc = SCNGeometrySource(vertices: positions)
@@ -88,28 +107,23 @@ struct ARCameraPreview: UIViewRepresentable {
                 bytesPerComponent: MemoryLayout<Float>.size,
                 dataOffset: 0,
                 dataStride: MemoryLayout<SIMD4<Float>>.stride)
-
             var indices = [Int32](0..<Int32(positions.count))
             let idxData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
             let element = SCNGeometryElement(
                 data: idxData,
                 primitiveType: .triangles,
-                primitiveCount: faceCount,
+                primitiveCount: triCount,
                 bytesPerIndex: MemoryLayout<Int32>.size)
-
             let geometry = SCNGeometry(sources: [posSrc, colorSrc], elements: [element])
             let mat = SCNMaterial()
             mat.lightingModel = .constant
             mat.isDoubleSided = true
-            mat.fillMode = .fill
             mat.writesToDepthBuffer = false
-            mat.readsFromDepthBuffer = true
             geometry.materials = [mat]
             return geometry
         }
 
-        private static func vertex(at index: Int,
-                                   source: ARGeometrySource) -> SIMD3<Float> {
+        private static func vertex(at index: Int, source: ARGeometrySource) -> SIMD3<Float> {
             let ptr = source.buffer.contents()
                 .advanced(by: source.offset + source.stride * index)
             return ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
@@ -136,13 +150,11 @@ struct ARCameraPreview: UIViewRepresentable {
 
         private static func color(for cls: ARMeshClassification) -> SIMD4<Float> {
             switch cls {
-            case .floor: return SIMD4(0.15, 0.90, 0.35, 0.42)   // green — walkable
-            case .wall: return SIMD4(1.00, 0.55, 0.10, 0.38)    // orange
-            case .door: return SIMD4(0.20, 0.45, 1.00, 0.48)    // blue
-            case .window: return SIMD4(0.20, 0.90, 0.95, 0.45)  // cyan
-            case .ceiling: return SIMD4(0.70, 0.70, 0.75, 0.22)
-            case .table, .seat: return SIMD4(0.85, 0.30, 0.85, 0.35)
-            default: return SIMD4(0.55, 0.55, 0.55, 0.20)
+            case .floor: return SIMD4(0.15, 0.90, 0.35, 0.40)
+            case .wall: return SIMD4(1.00, 0.55, 0.10, 0.35)
+            case .door: return SIMD4(0.20, 0.45, 1.00, 0.45)
+            case .window: return SIMD4(0.20, 0.90, 0.95, 0.42)
+            default: return SIMD4(0.55, 0.55, 0.55, 0.15)
             }
         }
     }
@@ -151,6 +163,8 @@ struct ARCameraPreview: UIViewRepresentable {
         var imageSize: CGSize = CGSize(width: 1920, height: 1440)
         private let overlay = CALayer()
         private var lastBoxes: [DetBox] = []
+        private var lastBoxSig = ""
+        private var meshOn = false
 
         override init(frame: CGRect, options: [String: Any]? = nil) {
             super.init(frame: frame, options: options)
@@ -160,9 +174,11 @@ struct ARCameraPreview: UIViewRepresentable {
         required init?(coder: NSCoder) { fatalError() }
 
         func setMeshVisible(_ on: Bool) {
+            meshOn = on
             scene.rootNode.enumerateChildNodes { node, _ in
                 if node.name?.hasPrefix("mesh.") == true {
                     node.isHidden = !on
+                    if !on { node.geometry = nil }
                 }
             }
         }
@@ -170,20 +186,23 @@ struct ARCameraPreview: UIViewRepresentable {
         override func layoutSubviews() {
             super.layoutSubviews()
             overlay.frame = bounds
+            lastBoxSig = ""
             render(lastBoxes)
         }
 
         func render(_ boxes: [DetBox]) {
             lastBoxes = boxes
+            let sig = boxes.map { "\($0.id):\($0.alert):\($0.text)" }.joined(separator: "|")
+            guard sig != lastBoxSig else { return }
+            lastBoxSig = sig
+
             overlay.sublayers?.forEach { $0.removeFromSuperlayer() }
             let viewSize = bounds.size
             guard viewSize.width > 1, viewSize.height > 1 else { return }
 
-            // 구조물 인식 밴드(가로 중앙 1/3) 가이드 — 좌우 벽 무시 구간 시각화
             let band = CAShapeLayer()
             let path = UIBezierPath()
-            let x1 = viewSize.width / 3
-            let x2 = viewSize.width * 2 / 3
+            let x1 = viewSize.width / 3, x2 = viewSize.width * 2 / 3
             path.move(to: CGPoint(x: x1, y: 0)); path.addLine(to: CGPoint(x: x1, y: viewSize.height))
             path.move(to: CGPoint(x: x2, y: 0)); path.addLine(to: CGPoint(x: x2, y: viewSize.height))
             band.path = path.cgPath
@@ -196,30 +215,25 @@ struct ARCameraPreview: UIViewRepresentable {
                 let v = b.visionBox
                 let metadataRect = CGRect(x: 1 - v.maxY, y: 1 - v.maxX,
                                           width: v.height, height: v.width)
-                let rect = Self.aspectFillRect(metadataRect,
-                                               imageSize: imageSize,
+                let rect = Self.aspectFillRect(metadataRect, imageSize: imageSize,
                                                viewSize: viewSize)
                 guard rect.width > 1, rect.height > 1 else { continue }
                 let color: CGColor = b.alert
                     ? UIColor.systemRed.cgColor : UIColor.systemGreen.cgColor
-
                 let box = CAShapeLayer()
                 box.path = UIBezierPath(roundedRect: rect, cornerRadius: 4).cgPath
                 box.strokeColor = color
                 box.lineWidth = 2.5
                 box.fillColor = UIColor.clear.cgColor
                 overlay.addSublayer(box)
-
                 let label = CATextLayer()
                 label.string = " \(b.text) "
                 label.fontSize = 13
                 label.foregroundColor = UIColor.black.cgColor
                 label.backgroundColor = color
-                label.alignmentMode = .left
                 label.contentsScale = UIScreen.main.scale
                 let lh: CGFloat = 17
-                label.frame = CGRect(x: rect.minX,
-                                     y: max(rect.minY - lh, 0),
+                label.frame = CGRect(x: rect.minX, y: max(rect.minY - lh, 0),
                                      width: max(rect.width, 60), height: lh)
                 overlay.addSublayer(label)
             }

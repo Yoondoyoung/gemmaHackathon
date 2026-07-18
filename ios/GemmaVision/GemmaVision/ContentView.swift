@@ -12,7 +12,8 @@ struct ContentView: View {
     @StateObject private var gemma = GemmaChat()
     @StateObject private var speechIn = SpeechIn()
     @State private var isPressingTalk = false
-    @State private var showMesh = true   // 디버그: 분류별 컬러 메쉬
+    // 표시만 OFF — ARKit 벽/바닥/갈림길 기능은 Mesh 토글과 무관하게 항상 동작
+    @State private var showMesh = false
 
     var body: some View {
         ZStack(alignment: .top) {

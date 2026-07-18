@@ -35,7 +35,7 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "ar.camera")
     private var lastStructureAt = Date.distantPast
-    private static let structurePeriod: TimeInterval = 0.25
+    private static let structurePeriod: TimeInterval = 0.4   // 메쉬 스캔 부하↓
 
     private static let screenCenterMinX: CGFloat = 1.0 / 3.0
     private static let screenCenterMaxX: CGFloat = 2.0 / 3.0
