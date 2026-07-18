@@ -55,10 +55,13 @@ def main():
     def on_new_texts(fresh):
         """처음 보는 표지판: 1회 알림 + 목표 매칭 (룰베이스, LLM 미경유).
         긴/깨진 텍스트는 SceneState에 저장만 하고 낭독하지 않는다 (목표 매칭은 전부 검사)."""
+        import re
         for it in fresh:
             spoken_pos = config.POS_SPOKEN[it["pos"]]
             goal = state["goal"]
-            if goal and any(kw in it["content"].lower() for kw in goal):
+            # 단어 경계 매칭 — "men"이 EQUIPMENT에 걸리는 오탐 방지
+            if goal and any(re.search(rf"\b{re.escape(kw)}\b", it["content"].lower())
+                            for kw in goal):
                 speaker.say(f"Found it — a sign for {it['content']}, {spoken_pos}", 1)
                 state["goal"] = None
                 continue
