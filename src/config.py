@@ -36,6 +36,10 @@ DEPTH_MED_M = 5.0                    # 이내면 medium
 CLOSING_RATE = 0.15                  # bbox_h_ratio 초당 증가율 → approaching
 DEPTH_CLOSING_MPS = 0.5              # depth 감소율(m/s) — 정면에서 이 속도로 접근 중이면 경고
 DEPTH_CLOSING_MAX_M = 5.0            # 이 거리 안에서 접근 중일 때만 (너무 먼 접근은 무시)
+
+# 신호등 색 판정 (룰베이스 HSV — LLM/Florence 금지: 안전 판정 + 즉시성 필요)
+LIGHT_MIN_FRACTION = 0.03            # 크롭에서 점등 색 픽셀 비율이 이 이상일 때만 판정
+LIGHT_MIN_BOX_PX = 12                # 이보다 작은 박스는 판정 안 함 (노이즈)
 GONE_AFTER_MISSES = 5                # 연속 미검출 프레임 수 → 객체 제거
 
 # 의자 점유: person–chair IoU 또는 person 하단 중심이 chair 안이면 occupied

@@ -21,6 +21,23 @@ def _bbox_depth(depth_entry, x1, y1, x2, y2, w, h):
     return float(np.median(region)) if region.size else None
 
 
+def classify_light(crop_bgr):
+    """신호등 크롭 → 'red' | 'green' | None. 룰베이스 HSV (빨강+주황=정지 계열).
+    꺼진 하우징/뒷면은 점등 픽셀이 없어 None (실영상 네거티브 확인)."""
+    if crop_bgr is None or crop_bgr.size == 0 \
+            or min(crop_bgr.shape[:2]) < config.LIGHT_MIN_BOX_PX:
+        return None
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    lit = v > 120
+    red = ((((h < 12) | (h > 168)) | ((h >= 8) & (h <= 28)))
+           & (s > 80) & lit).mean()
+    green = ((h >= 40) & (h <= 95) & (s > 50) & lit).mean()
+    if max(red, green) < config.LIGHT_MIN_FRACTION:
+        return None
+    return "red" if red >= green else "green"
+
+
 def load_model():
     from ultralytics import YOLO
     try:
@@ -57,12 +74,16 @@ def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             cx = (x1 + x2) / 2
             pos = "left" if cx < w / 3 else ("center" if cx < 2 * w / 3 else "right")
-            detections.append({"track_id": int(box.id), "label": label,
-                               "pos": pos, "bbox_h_ratio": (y2 - y1) / h,
-                               "bbox": [x1, y1, x2, y2],
-                               "bottom": y2 / h,
-                               "depth_m": _bbox_depth(depth_entry, x1, y1, x2, y2, w, h),
-                               "_xy": (int(x1), int(y1))})
+            det = {"track_id": int(box.id), "label": label,
+                   "pos": pos, "bbox_h_ratio": (y2 - y1) / h,
+                   "bbox": [x1, y1, x2, y2],
+                   "bottom": y2 / h,
+                   "depth_m": _bbox_depth(depth_entry, x1, y1, x2, y2, w, h),
+                   "_xy": (int(x1), int(y1))}
+            if label == "traffic light":
+                det["light"] = classify_light(
+                    frame[int(y1):int(y2), int(x1):int(x2)])
+            detections.append(det)
         for sentence in alert_engine.process(scene.update_objects(detections)):
             speaker.say(sentence, priority=0)
         overlay = res.plot()

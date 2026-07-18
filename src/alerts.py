@@ -12,7 +12,9 @@ class AlertEngine:
     def process(self, events) -> list:
         """상태 전이 Event 목록 → 발화할 경고 문장 (한 번에 최대 1건)."""
         now = time.time()
-        cands = [e for e in events if e.pos == "center"]
+        # 신호등 상태는 위치 무관 (신호등은 대개 화면 상단 좌/우에 있음)
+        cands = [e for e in events
+                 if e.pos == "center" or e.kind.startswith("light_")]
         # near 진입이 approaching보다 우선
         cands.sort(key=lambda e: 0 if e.kind in ("new_near", "entered_near") else 1)
         for e in cands:
@@ -26,6 +28,8 @@ class AlertEngine:
             if e.depth_m is not None:                 # 미터 실측이 있으면 포함
                 m = max(1, round(e.depth_m))
                 dist_phrase = f", {m} meter{'s' if m > 1 else ''}"
+            if e.kind.startswith("light_"):
+                return [f"The light is {e.kind.split('_')[1]}"]
             if e.kind in ("new_near", "entered_near"):
                 return [f"{e.label} ahead{dist_phrase or ', close'}"]
             return [f"{e.label} approaching{dist_phrase}"]

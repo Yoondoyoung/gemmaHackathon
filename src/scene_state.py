@@ -133,12 +133,19 @@ class SceneState:
                         events.append(Event("approaching", d["label"], d["pos"],
                                             tid, depth_m))
                     status = "approaching" if closing else "seen"
+                # 신호등 색 상태 전이 → 이벤트 (룰베이스 HSV 판정 결과)
+                light = d.get("light")
+                if light and (prev is None or prev.get("light") != light):
+                    events.append(Event(f"light_{light}", d["label"], d["pos"],
+                                        tid, depth_m))
                 entry = {"label": d["label"], "pos": d["pos"],
                          "bbox_h_ratio": d["bbox_h_ratio"],
                          "depth_m": depth_m,
                          "dist": dist, "status": status, "misses": 0}
                 if "bbox" in d:
                     entry["bbox"] = d["bbox"]
+                if light:
+                    entry["light"] = light
                 self._objects[tid] = entry
             for tid in list(self._objects):
                 if tid not in seen:
@@ -192,6 +199,8 @@ class SceneState:
                     item["depth_m"] = round(o["depth_m"], 1)   # 스키마 선택 필드 (팀 합의)
                 if o["label"] == "chair" and "occupied" in o:
                     item["occupied"] = o["occupied"]
+                if o.get("light"):
+                    item["light"] = o["light"]      # 신호등 색 (red|green)
                 objs.append(item)
             texts = sorted((t for t in self._texts
                             if now - t["ts"] <= config.TEXT_TTL_SEC),
