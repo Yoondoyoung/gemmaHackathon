@@ -5,9 +5,12 @@ from src import config
 
 
 class AlertEngine:
+    LIGHT_DEDUP_SEC = 15.0        # 같은 신호색 재알림 금지 (탐지 플래핑 억제)
+
     def __init__(self):
         self._last_by_label = {}   # 라벨 기준 쿨다운 — 트래킹 ID 재할당(churn)에도 스팸 방지
         self._last_global = -1e9
+        self._last_light = {}      # color -> t
 
     def process(self, events) -> list:
         """상태 전이 Event 목록 → 발화할 경고 문장 (한 번에 최대 1건)."""
@@ -29,7 +32,11 @@ class AlertEngine:
                 m = max(1, round(e.depth_m))
                 dist_phrase = f", {m} meter{'s' if m > 1 else ''}"
             if e.kind.startswith("light_"):
-                return [f"The light is {e.kind.split('_')[1]}"]
+                color = e.kind.split("_")[1]
+                if now - self._last_light.get(color, -1e9) < self.LIGHT_DEDUP_SEC:
+                    continue
+                self._last_light[color] = now
+                return [f"The light is {color}"]
             if e.kind in ("new_near", "entered_near"):
                 return [f"{e.label} ahead{dist_phrase or ', close'}"]
             return [f"{e.label} approaching{dist_phrase}"]
