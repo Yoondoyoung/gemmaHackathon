@@ -15,6 +15,8 @@ enum Config {
         "couch": 0.80, "bench": 0.70, "car": 0.70, "bus": 0.85, "truck": 0.85]
     static let defaultNear: CGFloat = 0.55
     static let nearBottomMaxY: CGFloat = 0.25    // Vision 좌표(원점 좌하단): minY < 0.25 = 바닥 접점
+    static let nearMeters: Double = 2.5          // LiDAR 실측 기준 (Mac판 depth 튜닝값)
+    static let mediumMeters: Double = 5.0
     static let confMin: Float = 0.4
     static let alertCooldown: TimeInterval = 5    // 라벨별 (ID churn 대응, Mac판 실측 반영)
     static let alertGlobalGap: TimeInterval = 2
@@ -53,7 +55,7 @@ final class Pipeline: ObservableObject {
         }
     }
 
-    func process(_ pixelBuffer: CVPixelBuffer) {
+    func process(_ pixelBuffer: CVPixelBuffer, depth: CVPixelBuffer?) {
         guard !processing, let model else { return }
         processing = true
         queue.async { [self] in
@@ -72,14 +74,16 @@ final class Pipeline: ObservableObject {
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                                 orientation: .right)  // 세로 파지
             try? handler.perform(requests)
-            handleDetections(detect.results as? [VNRecognizedObjectObservation] ?? [])
+            handleDetections(detect.results as? [VNRecognizedObjectObservation] ?? [],
+                             depth: depth)
             if let ocr { handleTexts(ocr.results ?? []) }
         }
     }
 
     // MARK: - 장애물 경고 (룰베이스 — LLM 금지 원칙 유지)
 
-    private func handleDetections(_ observations: [VNRecognizedObjectObservation]) {
+    private func handleDetections(_ observations: [VNRecognizedObjectObservation],
+                                  depth: CVPixelBuffer?) {
         var summary: [String] = []
         var objects: [(String, String, String)] = []
         for obs in observations {
@@ -87,12 +91,21 @@ final class Pipeline: ObservableObject {
                   Config.trackLabels.contains(top.identifier) else { continue }
             let box = obs.boundingBox           // 정규화, 원점 좌하단
             let pos = position(ofMidX: box.midX)
-            let nearThresh = Config.nearThresh[top.identifier] ?? Config.defaultNear
-            let near = box.height >= nearThresh
-                && box.minY < Config.nearBottomMaxY   // 크기 + 바닥 접점 (Mac판 규칙)
-            let dist = near ? "near" : (box.height >= nearThresh * 0.5 ? "medium" : "far")
+            let meters = depth.flatMap { medianDepth($0, box: box) }
+            let near: Bool
+            let dist: String
+            if let m = meters {                  // LiDAR 실측 (Mac판 depth 판정 이식)
+                near = m <= Config.nearMeters
+                dist = near ? "near" : (m <= Config.mediumMeters ? "medium" : "far")
+            } else {                             // 휴리스틱 폴백: 크기 + 바닥 접점
+                let thresh = Config.nearThresh[top.identifier] ?? Config.defaultNear
+                near = box.height >= thresh && box.minY < Config.nearBottomMaxY
+                dist = near ? "near" : (box.height >= thresh * 0.5 ? "medium" : "far")
+            }
             objects.append((top.identifier, pos, dist))
-            summary.append("\(top.identifier) \(pos) h=\(String(format: "%.2f", box.height))")
+            let tag = meters.map { String(format: "%.1fm", $0) }
+                ?? String(format: "h=%.2f", box.height)
+            summary.append("\(top.identifier) \(pos) \(tag)")
             guard near, pos == "center" else { continue }
             let now = Date()
             if now.timeIntervalSince(lastAlertByLabel[top.identifier] ?? .distantPast)
@@ -100,11 +113,44 @@ final class Pipeline: ObservableObject {
             if now.timeIntervalSince(lastGlobalAlert) < Config.alertGlobalGap { continue }
             lastAlertByLabel[top.identifier] = now
             lastGlobalAlert = now
-            speak("\(top.identifier) ahead, close", priority: 0)
+            if let m = meters {
+                let rounded = max(1, Int(m.rounded()))
+                speak("\(top.identifier) ahead, \(rounded) meter\(rounded > 1 ? "s" : "")",
+                      priority: 0)
+            } else {
+                speak("\(top.identifier) ahead, close", priority: 0)
+            }
         }
         lastObjects = objects
         let line = summary.isEmpty ? "clear" : summary.joined(separator: " | ")
         DispatchQueue.main.async { self.statusLine = line }
+    }
+
+    /// LiDAR 깊이 맵에서 bbox 중앙 50% 영역의 중앙값(미터).
+    /// 좌표 변환: Vision(세로 표시 공간, 원점 좌하단) → 센서 버퍼(가로, 원점 좌상단)
+    /// orientation .right 기준: x_buf = (1 - y_vis) * W, y_buf = (1 - x_vis) * H
+    private func medianDepth(_ depth: CVPixelBuffer, box: CGRect) -> Double? {
+        CVPixelBufferLockBaseAddress(depth, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depth, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(depth) else { return nil }
+        let w = CVPixelBufferGetWidth(depth)
+        let h = CVPixelBufferGetHeight(depth)
+        let rowBytes = CVPixelBufferGetBytesPerRow(depth)
+        let inner = box.insetBy(dx: box.width / 4, dy: box.height / 4)
+        var samples: [Double] = []
+        for i in 0..<8 {
+            for j in 0..<8 {
+                let u = inner.minX + inner.width * CGFloat(i) / 7
+                let v = inner.minY + inner.height * CGFloat(j) / 7
+                let xb = min(max(Int((1 - v) * CGFloat(w)), 0), w - 1)
+                let yb = min(max(Int((1 - u) * CGFloat(h)), 0), h - 1)
+                let value = base.advanced(by: yb * rowBytes + xb * 4)
+                    .assumingMemoryBound(to: Float32.self).pointee
+                if value.isFinite && value > 0 { samples.append(Double(value)) }
+            }
+        }
+        guard samples.count >= 8 else { return nil }   // LiDAR 범위 밖(>5m 등)이면 폴백
+        return samples.sorted()[samples.count / 2]
     }
 
     /// Gemma 프롬프트용 장면 스냅샷 (Mac판 SceneState.snapshot_json 축소 이식)

@@ -36,7 +36,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            camera.onFrame = { pipeline.process($0) }
+            camera.onFrame = { pipeline.process($0, depth: $1) }
             camera.start()
             gemma.load()
             SpeechOut.shared.say("Vision assist started", priority: 1)
