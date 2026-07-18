@@ -28,6 +28,8 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
 
     let session = ARSession()
     @Published var hasSceneMesh = false
+    /// sceneReconstruction 실제 on/off — UI용 (메인에서만 갱신)
+    @Published private(set) var meshEnabled = false
     @Published var mapStatus = ""          // WorldMap 저장/로드 상태
     /// (영상, 깊이, 카메라 월드 위치, 수평 전방)
     var onFrame: ((CVPixelBuffer, CVPixelBuffer?, SIMD3<Float>, SIMD3<Float>) -> Void)?
@@ -38,7 +40,11 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
     private var lastAutoSaveAt = Date.distantPast
     private var trackingNormal = false
     private var savingMap = false
+    private var sessionStarted = false
+    /// 델리게이트 큐에서 읽는 실제 플래그
+    private var meshOn = false
     private var lifecycleObservers: [NSObjectProtocol] = []
+    private var lastPoseForClear: (SIMD3<Float>, SIMD3<Float>)?
     private static let structurePeriod: TimeInterval = 0.4   // 메쉬 스캔 부하↓
     /// tracking normal + 메쉬 있을 때 주기 자동저장
     private static let autoSavePeriod: TimeInterval = 20
@@ -71,11 +77,13 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
             .appendingPathComponent("visionassist_world.map")
     }
 
-    func start(withSavedMap: Bool = true) {
+    /// 기본은 메쉬 OFF — YOLO+LiDAR 깊이+월드 포즈만. 데모에서 필요할 때 `setMeshEnabled(true)`.
+    func start(withSavedMap: Bool = true, meshEnabled: Bool = false) {
         guard Self.isSupported else { return }
         observeAppLifecycle()
         queue.async {
-            let config = self.makeConfig()
+            self.meshOn = meshEnabled
+            let config = self.makeConfig(mesh: meshEnabled)
             // 저장된 맵이 있으면 자동으로 불러와 재로컬라이즈 시도
             if withSavedMap, let map = self.loadMapFromDisk() {
                 config.initialWorldMap = map
@@ -84,7 +92,45 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
             self.session.delegate = self
             self.session.delegateQueue = self.queue
             self.session.run(config, options: [.resetTracking, .removeExistingAnchors])
-            DispatchQueue.main.async { self.hasSceneMesh = true }
+            self.sessionStarted = true
+            DispatchQueue.main.async {
+                self.meshEnabled = meshEnabled
+                self.hasSceneMesh = meshEnabled
+                if meshEnabled {
+                    self.mapStatus = self.mapStatus.isEmpty ? "mesh ON" : self.mapStatus
+                } else {
+                    self.mapStatus = "mesh OFF — tap Mesh when needed"
+                }
+            }
+        }
+    }
+
+    /// 메쉬 재구성·스캔·앵커를 실제로 켜고 끔 (오버레이만이 아님). 트래킹/포즈는 유지.
+    func setMeshEnabled(_ on: Bool) {
+        queue.async {
+            guard self.sessionStarted else { return }
+            guard self.meshOn != on else { return }
+            // 끄기 직전 맵 한번 저장 (다시 켤 때·재실행용)
+            if !on { self.persistWorldMap(reason: "autosaved") }
+
+            self.meshOn = on
+            self.leftStreak = 0
+            self.rightStreak = 0
+            let config = self.makeConfig(mesh: on)
+            // resetTracking 없이 앵커만 제거 → 가방 월드좌표 유지 + 메쉬 VRAM/CPU 해제
+            self.session.run(config, options: [.removeExistingAnchors])
+
+            if !on, let pose = self.lastPoseForClear {
+                self.onStructures?(StructureUpdate(hits: [], cameraPosition: pose.0,
+                                                   cameraForward: pose.1))
+            }
+            DispatchQueue.main.async {
+                self.hasSceneMesh = on
+                self.meshEnabled = on
+                self.mapStatus = on
+                    ? "mesh ON — scanning walls/path"
+                    : "mesh OFF — anchors cleared"
+            }
         }
     }
 
@@ -169,16 +215,19 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
                 DispatchQueue.main.async { self.mapStatus = "no saved map" }
                 return
             }
-            let config = self.makeConfig()
+            let config = self.makeConfig(mesh: self.meshOn)
             config.initialWorldMap = map
             self.session.run(config, options: [.resetTracking, .removeExistingAnchors])
             DispatchQueue.main.async { self.mapStatus = "map loaded — look around to relocalize" }
         }
     }
 
-    private func makeConfig() -> ARWorldTrackingConfiguration {
+    private func makeConfig(mesh: Bool) -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
-        config.sceneReconstruction = .meshWithClassification
+        // OFF면 메쉬 재구성 자체 중단 — 스캔 루프뿐 아니라 LiDAR 메쉬 파이프라인 부하 제거
+        if mesh {
+            config.sceneReconstruction = .meshWithClassification
+        }
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
         }
@@ -199,7 +248,11 @@ extension ARCameraManager: ARSessionDelegate {
         let pixel = frame.capturedImage
         let depth = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
         let (position, forward) = Self.pose(from: frame.camera.transform)
+        lastPoseForClear = (position, forward)
         onFrame?(pixel, depth, position, forward)
+
+        // 메쉬 OFF: 구조물 스캔·자동저장 스킵 (YOLO/포즈/깊이는 위 onFrame으로 계속)
+        guard meshOn else { return }
 
         let now = Date()
         guard now.timeIntervalSince(lastStructureAt) >= Self.structurePeriod else { return }

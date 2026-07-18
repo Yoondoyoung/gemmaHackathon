@@ -12,8 +12,6 @@ struct ContentView: View {
     @StateObject private var gemma = GemmaChat()
     @StateObject private var speechIn = SpeechIn()
     @State private var isPressingTalk = false
-    // 표시만 OFF — ARKit 벽/바닥/갈림길 기능은 Mesh 토글과 무관하게 항상 동작
-    @State private var showMesh = false
     /// Gemma(GPU) init이 ARKit보다 먼저 끝나게 — Metal 경합으로 GPU→CPU 폴백 방지
     @State private var sensorsStarted = false
 
@@ -23,7 +21,7 @@ struct ContentView: View {
                 if useAR {
                     ARCameraPreview(session: arCamera.session,
                                     boxes: pipeline.boxes,
-                                    showMesh: showMesh)
+                                    showMesh: arCamera.meshEnabled)
                 } else {
                     CameraPreview(session: camera.session, boxes: pipeline.boxes)
                 }
@@ -32,10 +30,12 @@ struct ContentView: View {
             .allowsHitTesting(false)   // 프리뷰가 PTT 터치를 가로채지 않게
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(useAR ? "ARKit mesh + YOLO" : "YOLO (no scene mesh)")
+                Text(useAR
+                     ? (arCamera.meshEnabled ? "ARKit mesh ON + YOLO" : "ARKit mesh OFF + YOLO")
+                     : "YOLO (no scene mesh)")
                     .font(.caption2.monospaced())
                     .foregroundColor(.white.opacity(0.7))
-                if useAR && showMesh {
+                if useAR && arCamera.meshEnabled {
                     Text("mesh: floor·green  wall·orange  door·blue  window·cyan")
                         .font(.caption2.monospaced())
                         .foregroundColor(.white.opacity(0.65))
@@ -75,13 +75,16 @@ struct ContentView: View {
                 VStack {
                     HStack {
                         Spacer()
-                        Button(showMesh ? "Mesh ON" : "Mesh OFF") {
-                            showMesh.toggle()
+                        Button(arCamera.meshEnabled ? "Mesh ON" : "Mesh OFF") {
+                            // 표시만이 아니라 sceneReconstruction·앵커까지 on/off
+                            arCamera.setMeshEnabled(!arCamera.meshEnabled)
                         }
                         .font(.caption.bold())
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                        .background(showMesh ? Color.green.opacity(0.85) : Color.gray.opacity(0.75))
+                        .background(arCamera.meshEnabled
+                                    ? Color.green.opacity(0.85)
+                                    : Color.gray.opacity(0.75))
                         .foregroundColor(.white)
                         .clipShape(Capsule())
                     }
@@ -102,7 +105,7 @@ struct ContentView: View {
             gemma.load()
             speechIn.prepare()
             let boot = useAR
-                ? "Vision assist started with scene mesh. Hold the button to ask."
+                ? "Vision assist started. Mesh is off to save power. Tap Mesh when you need walls or path guidance."
                 : "Vision assist started. Hold the button to ask."
             SpeechOut.shared.say(boot, priority: 1)
             // 로드가 너무 길면 센서는 나중에라도 킴
@@ -126,7 +129,7 @@ struct ContentView: View {
                 pipeline.process(pixel, depth: depth, pose: (pos, fwd))
             }
             arCamera.onStructures = { pipeline.processStructures($0) }
-            arCamera.start(withSavedMap: true)
+            arCamera.start(withSavedMap: true, meshEnabled: false)
         } else {
             camera.onFrame = { pipeline.process($0, depth: $1, pose: nil) }
             camera.start()
