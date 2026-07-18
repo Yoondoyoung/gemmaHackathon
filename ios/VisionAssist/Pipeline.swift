@@ -49,7 +49,13 @@ final class Pipeline: ObservableObject {
     init() {
         // Xcode가 yolo11n.mlpackage에서 생성한 클래스 사용 (프로젝트에 모델 추가 필수)
         let cfg = MLModelConfiguration()
-        cfg.computeUnits = .all   // Neural Engine 우선
+        // .all 금지: GPU(MPSGraph) 컴파일이 일부 기기/시뮬레이터에서
+        // `MLIR pass manager failed` assertion으로 프로세스째 죽는다 (실기기 확인).
+        #if targetEnvironment(simulator)
+        cfg.computeUnits = .cpuOnly
+        #else
+        cfg.computeUnits = .cpuAndNeuralEngine   // 그래도 죽으면 .cpuOnly
+        #endif
         if let ml = try? yolo11n(configuration: cfg).model {
             model = try? VNCoreMLModel(for: ml)
         }
