@@ -36,7 +36,8 @@ def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
             cx = (x1 + x2) / 2
             pos = "left" if cx < w / 3 else ("center" if cx < 2 * w / 3 else "right")
             detections.append({"track_id": int(box.id), "label": label,
-                               "pos": pos, "bbox_h_ratio": (y2 - y1) / h})
+                               "pos": pos, "bbox_h_ratio": (y2 - y1) / h,
+                               "bbox": [x1, y1, x2, y2]})
         for sentence in alert_engine.process(scene.update_objects(detections)):
             speaker.say(sentence, priority=0)
         shared["overlay"] = res.plot()

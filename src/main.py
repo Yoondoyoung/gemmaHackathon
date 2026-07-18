@@ -24,6 +24,15 @@ from src.vision import yolo_worker
 from src.vision.camera import Camera
 
 DESCRIBE_WORDS = ("describe", "what do you see", "around me", "in front of")
+# 빈 자리 Q&A는 표지판 goal 매칭 대상이 아님 → extract_goal 스킵 (Gemma 2차 호출 절약)
+EMPTY_SEAT_WORDS = ("empty seat", "free chair", "vacant seat", "vacant chair",
+                    "where can i sit", "find a seat", "find an empty",
+                    "빈 자리", "빈자리", "빈 의자")
+
+
+def _is_empty_seat_question(question: str) -> bool:
+    q = question.lower()
+    return any(w in q for w in EMPTY_SEAT_WORDS)
 
 
 def main():
@@ -104,15 +113,23 @@ def main():
                     except Exception:
                         pass
             t0 = time.time()
-            answer = gemma_client.ask_streaming(
-                question, scene.snapshot_json(), lambda s: speaker.say(s, 1))
+            snap = scene.snapshot_json()
+            if _is_empty_seat_question(question):
+                # 문장 단위 TTS 대신 전체 답을 한 번만 발화
+                answer = gemma_client.ask_streaming(question, snap, lambda _s: None)
+                speaker.say(answer.strip() if answer.strip()
+                            else "Sorry, I couldn't process that.", 1)
+                print("[goal 스킵] empty-seat question")
+            else:
+                answer = gemma_client.ask_streaming(
+                    question, snap, lambda s: speaker.say(s, 1))
+                if config.GOAL_ENABLED:
+                    kws = gemma_client.extract_goal(question)
+                    if kws:
+                        state["goal"] = kws
+                        print(f"[goal 설정] {kws}")
             scene.set_caption(None)
             state["last_qa"] = f"{time.time()-t0:.1f}s"
-            if config.GOAL_ENABLED:
-                kws = gemma_client.extract_goal(question)
-                if kws:
-                    state["goal"] = kws
-                    print(f"[goal 설정] {kws}")
         finally:
             state["busy"] = False
 
