@@ -6,6 +6,10 @@ import SwiftUI
 @main
 struct VisionAssistApp: App {
     var body: some Scene {
-        WindowGroup { ContentView() }
+        WindowGroup {
+            ContentView()
+            // 영상 파일로 테스트할 때만 위를 주석 처리하고 아래를 사용:
+            // VideoTestView(clip: "nyc2.mp4")   // nil이면 번들 첫 영상
+        }
     }
 }

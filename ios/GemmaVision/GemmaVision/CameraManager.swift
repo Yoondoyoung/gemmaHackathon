@@ -1,6 +1,7 @@
 // 후면 카메라 캡처 — 최신 프레임만 파이프라인에 전달 (버퍼링 없음, Mac판과 동일 원칙).
 // Pro 기기(12 Pro+)는 LiDAR로 미터 단위 깊이 맵을 동기 전달, 아니면 nil (휴리스틱 폴백).
 import AVFoundation
+import Combine
 import CoreVideo
 
 final class CameraManager: NSObject, ObservableObject,

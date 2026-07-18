@@ -1,0 +1,195 @@
+// 카메라 프리뷰 + 디버그 오버레이 (심사위원용 — 실사용자는 음성만 듣는다)
+import AVFoundation
+import SwiftUI
+
+struct ContentView: View {
+    @StateObject private var camera = CameraManager()
+    @StateObject private var pipeline = Pipeline()
+    @StateObject private var gemma = GemmaChat()
+    @StateObject private var speechIn = SpeechIn()
+    @State private var isPressingTalk = false
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            CameraPreview(session: camera.session, boxes: pipeline.boxes)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)   // 프리뷰가 PTT 터치를 가로채지 않게
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(pipeline.statusLine)
+                    .font(.caption.monospaced())
+                Text(pipeline.lastSpoken)
+                    .font(.headline)
+                    .foregroundColor(.yellow)
+                Text(gemmaStatus)
+                    .font(.caption)
+                    .foregroundColor(.cyan)
+                Text(speechStatus)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.black.opacity(0.5))
+            .foregroundColor(.green)
+            .allowsHitTesting(false)
+
+            VStack {
+                Spacer()
+                    .allowsHitTesting(false)
+                pushToTalkButton
+                    .padding(.bottom, 36)
+            }
+        }
+        .onAppear {
+            camera.onFrame = { pipeline.process($0, depth: $1) }
+            camera.start()
+            gemma.load()
+            speechIn.prepare()
+            SpeechOut.shared.say("Vision assist started. Hold the button to ask.", priority: 1)
+        }
+    }
+
+    private var gemmaStatus: String {
+        switch gemma.state {
+        case .idle: return "gemma: idle"
+        case .loading: return "gemma: loading model…"
+        case .ready: return "gemma: ready — " + gemma.lastAnswer
+        case .busy: return "gemma: thinking…"
+        case .failed(let why): return "gemma: FAILED — \(why)"
+        }
+    }
+
+    private var speechStatus: String {
+        switch speechIn.state {
+        case .idle:
+            return isPressingTalk ? "listening: …" : "mic: ready"
+        case .requestingAuth:
+            return "mic: requesting permission…"
+        case .listening:
+            return "listening: \(speechIn.partial.isEmpty ? "…" : speechIn.partial)"
+        case .unavailable(let why):
+            return "mic: \(why)"
+        }
+    }
+
+    private var pushToTalkEnabled: Bool {
+        gemma.state == .ready && speechIn.canListen && !gemmaBusy
+    }
+
+    private var gemmaBusy: Bool {
+        if case .busy = gemma.state { return true }
+        return false
+    }
+
+    private var pushToTalkButton: some View {
+        let active = isPressingTalk || speechIn.state == .listening
+        return Text(active ? "Release to ask" : "Hold to talk")
+            .font(.headline.bold())
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 22)
+            .padding(.horizontal, 24)
+            .background(active ? Color.red : (pushToTalkEnabled ? Color.blue : Color.gray))
+            .clipShape(Capsule())
+            .contentShape(Capsule())          // 배경 전체 터치
+            .padding(.horizontal, 28)
+            .opacity(pushToTalkEnabled || active ? 1 : 0.5)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !isPressingTalk else { return }
+                        guard pushToTalkEnabled, speechIn.state == .idle else { return }
+                        isPressingTalk = true
+                        speechIn.begin { question in
+                            gemma.ask(question,
+                                      scene: pipeline.snapshotJSON(),
+                                      imageJPEG: pipeline.frameJPEG())
+                        }
+                    }
+                    .onEnded { _ in
+                        isPressingTalk = false
+                        speechIn.end()
+                    }
+            )
+            .accessibilityLabel("Push to talk")
+            .accessibilityHint("Hold to speak your question, then release to send")
+    }
+}
+
+struct CameraPreview: UIViewRepresentable {
+    let session: AVCaptureSession
+    var boxes: [DetBox] = []
+
+    func makeUIView(context: Context) -> PreviewView {
+        let view = PreviewView()
+        view.isUserInteractionEnabled = false
+        view.videoPreviewLayer.session = session
+        view.videoPreviewLayer.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateUIView(_ uiView: PreviewView, context: Context) {
+        uiView.render(boxes)
+    }
+
+    final class PreviewView: UIView {
+        override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
+        var videoPreviewLayer: AVCaptureVideoPreviewLayer {
+            layer as! AVCaptureVideoPreviewLayer
+        }
+
+        private let overlay = CALayer()
+        private var lastBoxes: [DetBox] = []
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            overlay.zPosition = 1
+            layer.addSublayer(overlay)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            overlay.frame = bounds
+            render(lastBoxes)   // 회전/리사이즈 시 재배치
+        }
+
+        func render(_ boxes: [DetBox]) {
+            lastBoxes = boxes
+            overlay.sublayers?.forEach { $0.removeFromSuperlayer() }
+            for b in boxes {
+                // Vision(.right, 원점 좌하단) → 메타데이터(센서 네이티브, 원점 좌상단).
+                // medianDepth의 검증된 매핑과 동일 축변환.
+                let v = b.visionBox
+                let metadataRect = CGRect(x: 1 - v.maxY, y: 1 - v.maxX,
+                                          width: v.height, height: v.width)
+                let rect = videoPreviewLayer
+                    .layerRectConverted(fromMetadataOutputRect: metadataRect)
+                guard rect.width > 1, rect.height > 1 else { continue }
+                let color: CGColor = b.alert
+                    ? UIColor.systemRed.cgColor : UIColor.systemGreen.cgColor
+
+                let box = CAShapeLayer()
+                box.path = UIBezierPath(roundedRect: rect, cornerRadius: 4).cgPath
+                box.strokeColor = color
+                box.lineWidth = 2.5
+                box.fillColor = UIColor.clear.cgColor
+                overlay.addSublayer(box)
+
+                let label = CATextLayer()
+                label.string = " \(b.text) "
+                label.fontSize = 13
+                label.foregroundColor = UIColor.black.cgColor
+                label.backgroundColor = color
+                label.alignmentMode = .left
+                label.contentsScale = UIScreen.main.scale
+                let lh: CGFloat = 17
+                label.frame = CGRect(x: rect.minX,
+                                     y: max(rect.minY - lh, 0),
+                                     width: max(rect.width, 60), height: lh)
+                overlay.addSublayer(label)
+            }
+        }
+    }
+}

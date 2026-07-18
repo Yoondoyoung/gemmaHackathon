@@ -9,9 +9,10 @@ __pycache__/
 # 해커톤 이전 준비물 (제출 제외)
 _prep/
 
-# 내부 문서 (제출 제외, README는 예외)
+# 내부 문서 (제출 제외, README/iOS 빌드 가이드는 예외 — 팀원 빌드에 필요)
 *.md
 !README.md
+!ios/SETUP.md
 
 # 테스트 클립 / 영상 (용량)
 clips/
@@ -25,6 +26,18 @@ clips/
 # 로그
 nohup.out
 
-# CoreML 익스포트 산출물 (SETUP.md 명령으로 재생성)
+# CoreML 익스포트 산출물 (SETUP.md 명령으로 재생성). 단, iOS 앱에
+# 번들되는 소형 모델(yolo26n, 수 MB)은 예외로 커밋한다.
 *.mlpackage
+!ios/GemmaVision/GemmaVision/yolo26n.mlpackage
+!ios/GemmaVision/GemmaVision/yolo26n.mlpackage/**
+
+# Gemma litertlm 모델(~2.4GB) — 깃허브 파일 크기 제한 초과, 항상 별도 배포
+# (ios/GemmaVision/SETUP.md의 다운로드/AirDrop 안내 참고)
 *.litertlm
+
+# Xcode 사용자별 상태 (공유 시 충돌·무의미)
+xcuserdata/
+*.xcuserstate
+.swiftpm/
+DerivedData/
