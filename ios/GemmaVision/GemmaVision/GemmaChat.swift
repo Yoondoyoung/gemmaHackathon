@@ -14,6 +14,8 @@ final class GemmaChat: ObservableObject {
 
     @Published var state: State = .idle
     @Published var lastAnswer = ""
+    /// "GPU" | "CPU" | "" (로딩 전) — 오버레이 표시용
+    @Published var backendName = ""
     private var engine: Engine?
     private var askTask: Task<Void, Never>?
 
@@ -65,78 +67,76 @@ final class GemmaChat: ObservableObject {
             // 실기기: LLM은 Metal GPU. 비전 어댑터는 모델이 cpu constraint.
             // 시뮬레이터 GPU는 MPSGraph assertion으로 프로세스 사망 → CPU만.
             // iPhone 11 Pro(4GB): 1536 (Gemma4 최소 = prefill1024+window512).
-            let backend = Self.llmBackend
-            do {
-                if backend == .gpu {
-                    // assertion 크래시 대비: 성공 전에 플래그를 켜 두고, 성공 시 끈다.
-                    UserDefaults.standard.set(true, forKey: Self.forceCPUKey)
-                }
-                let config = try EngineConfig(
-                    modelPath: path,
-                    backend: backend,
-                    visionBackend: .cpu(),
-                    maxNumTokens: 1536,
-                    cacheDir: NSTemporaryDirectory())
-                let engine = Engine(engineConfig: config)
-                try await engine.initialize()
-                if backend == .gpu {
-                    UserDefaults.standard.set(false, forKey: Self.forceCPUKey)
-                }
-                self.engine = engine
-                state = .ready
-                Self.postPromptLogToMac(
-                    question: "(app ready — log link ok)",
-                    image: "none",
-                    scene: "{}")
-                SpeechOut.shared.say(
-                    "Assistant ready on \(backend == .gpu ? "GPU" : "CPU").",
-                    priority: 1)
-            } catch {
-                // GPU init이 throw로 실패하면 CPU로 재시도.
-                guard backend == .gpu else {
-                    state = .failed("\(error)")
-                    return
-                }
+            //
+            // forceCPUKey: GPU init 직전 true → 성공 시 false.
+            // 프로세스 사망(assertion) 시에만 플래그가 남아, 다음 1회만 CPU.
+            // throw 실패는 이번 세션만 CPU — 플래그를 남기지 않아 재실행 시 GPU 재시도.
+            let skipGPU = Self.consumeCrashSentinel()
+            #if targetEnvironment(simulator)
+            let tryGPU = false
+            #else
+            let tryGPU = !skipGPU
+            #endif
+
+            if tryGPU {
                 do {
                     UserDefaults.standard.set(true, forKey: Self.forceCPUKey)
-                    let cpu = try EngineConfig(
+                    let config = try EngineConfig(
                         modelPath: path,
-                        backend: .cpu(),
+                        backend: .gpu,
                         visionBackend: .cpu(),
                         maxNumTokens: 1536,
                         cacheDir: NSTemporaryDirectory())
-                    let engine = Engine(engineConfig: cpu)
+                    let engine = Engine(engineConfig: config)
                     try await engine.initialize()
+                    UserDefaults.standard.set(false, forKey: Self.forceCPUKey)
                     self.engine = engine
+                    backendName = "GPU"
                     state = .ready
                     Self.postPromptLogToMac(
                         question: "(app ready — log link ok)",
                         image: "none",
                         scene: "{}")
-                    SpeechOut.shared.say("Assistant ready on CPU.", priority: 1)
+                    SpeechOut.shared.say("Assistant ready on GPU.", priority: 1)
+                    return
                 } catch {
-                    state = .failed("\(error)")
+                    // throw면 크래시 아님 — 센티널 치우고 이번만 CPU
+                    UserDefaults.standard.set(false, forKey: Self.forceCPUKey)
+                    print("[gemma] GPU init failed, falling back to CPU: \(error)")
                 }
+            }
+
+            do {
+                let cpu = try EngineConfig(
+                    modelPath: path,
+                    backend: .cpu(),
+                    visionBackend: .cpu(),
+                    maxNumTokens: 1536,
+                    cacheDir: NSTemporaryDirectory())
+                let engine = Engine(engineConfig: cpu)
+                try await engine.initialize()
+                self.engine = engine
+                backendName = "CPU"
+                state = .ready
+                Self.postPromptLogToMac(
+                    question: "(app ready — log link ok)",
+                    image: "none",
+                    scene: "{}")
+                let why = skipGPU ? "CPU (prev GPU crash)" : "CPU"
+                SpeechOut.shared.say("Assistant ready on \(why).", priority: 1)
+            } catch {
+                state = .failed("\(error)")
             }
         }
     }
 
     private static let forceCPUKey = "gemma.forceCPU"
 
-    /// 실기기에서 GPU를 쓰고 싶은지 (시뮬레이터는 항상 nil).
-    private static var preferredGPUBackend: Backend? {
-        #if targetEnvironment(simulator)
-        return nil
-        #else
-        return .gpu
-        #endif
-    }
-
-    /// 이전 GPU 크래시/실패 기록이 있으면 CPU, 아니면 선호 백엔드.
-    private static var llmBackend: Backend {
-        if preferredGPUBackend == nil { return .cpu() }
-        if UserDefaults.standard.bool(forKey: forceCPUKey) { return .cpu() }
-        return .gpu
+    /// 이전 실행이 GPU init 중 죽었으면 true를 반환하고 플래그를 소비(이번 1회만 CPU).
+    private static func consumeCrashSentinel() -> Bool {
+        let flagged = UserDefaults.standard.bool(forKey: forceCPUKey)
+        if flagged { UserDefaults.standard.set(false, forKey: forceCPUKey) }
+        return flagged
     }
 
     /// 번들 → Documents 순으로 .litertlm 탐색

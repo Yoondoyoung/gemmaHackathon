@@ -48,6 +48,9 @@ struct ContentView: View {
                 Text(pipeline.lastSpoken)
                     .font(.headline)
                     .foregroundColor(.yellow)
+                Text(backendStatus)
+                    .font(.caption.bold().monospaced())
+                    .foregroundColor(gemma.backendName == "GPU" ? .green : .orange)
                 Text(gemmaStatus)
                     .font(.caption)
                     .foregroundColor(.cyan)
@@ -68,22 +71,8 @@ struct ContentView: View {
 
             if useAR {
                 VStack {
-                    HStack(spacing: 8) {
+                    HStack {
                         Spacer()
-                        Button("Save map") { arCamera.saveWorldMap() }
-                            .font(.caption.bold())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .background(Color.orange.opacity(0.85))
-                            .foregroundColor(.white)
-                            .clipShape(Capsule())
-                        Button("Load map") { arCamera.loadWorldMap() }
-                            .font(.caption.bold())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .background(Color.purple.opacity(0.85))
-                            .foregroundColor(.white)
-                            .clipShape(Capsule())
                         Button(showMesh ? "Mesh ON" : "Mesh OFF") {
                             showMesh.toggle()
                         }
@@ -123,6 +112,17 @@ struct ContentView: View {
                 ? "Vision assist started with scene mesh. Hold the button to ask."
                 : "Vision assist started. Hold the button to ask."
             SpeechOut.shared.say(boot, priority: 1)
+        }
+    }
+
+    private var backendStatus: String {
+        switch gemma.state {
+        case .idle: return "LLM: —"
+        case .loading: return "LLM: loading…"
+        case .failed: return "LLM: failed"
+        case .ready, .busy:
+            let name = gemma.backendName.isEmpty ? "?" : gemma.backendName
+            return "LLM backend: \(name)"
         }
     }
 
