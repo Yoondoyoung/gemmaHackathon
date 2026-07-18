@@ -112,7 +112,7 @@ struct ContentView: View {
                     pipeline.process(pixel, depth: depth, pose: (pos, fwd))
                 }
                 arCamera.onStructures = { pipeline.processStructures($0) }
-                arCamera.start(withSavedMap: false)
+                arCamera.start(withSavedMap: true)   // 있으면 자동 로드 + 주기/백그라운드 자동저장
             } else {
                 camera.onFrame = { pipeline.process($0, depth: $1, pose: nil) }
                 camera.start()

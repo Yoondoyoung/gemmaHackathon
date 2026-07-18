@@ -168,11 +168,12 @@ final class Pipeline: ObservableObject {
         var announcedPass: Bool
     }
     private var forkWaypoints: [ForkWaypoint] = []
-    // 물체 공간 기억 (backpack 등) — AR 월드 좌표
+    // 물체·표지판 공간 기억 — AR 월드 좌표 (GPS 아님)
     private struct ObjectMemory {
-        let label: String
+        let label: String       // "backpack" 또는 표지판 문구 "EXIT"
         let position: SIMD3<Float>
         let seenAt: Date
+        let isSign: Bool
     }
     private let memoryLock = NSLock()
     private var objectMemories: [ObjectMemory] = []
@@ -236,7 +237,7 @@ final class Pipeline: ObservableObject {
                 let ocrHandler = VNImageRequestHandler(ciImage: ciImage,
                                                        orientation: inputOrientation)
                 try? ocrHandler.perform([ocr])
-                handleTexts(ocr.results ?? [])
+                handleTexts(ocr.results ?? [], depth: depth)
             }
         }
     }
@@ -617,7 +618,8 @@ final class Pipeline: ObservableObject {
 
     // MARK: - 표지판 (Vision OCR — 알림 가치 필터는 Mac판 worth_announcing 이식)
 
-    private func handleTexts(_ observations: [VNRecognizedTextObservation]) {
+    private func handleTexts(_ observations: [VNRecognizedTextObservation],
+                             depth: CVPixelBuffer?) {
         for obs in observations {
             guard let candidate = obs.topCandidates(1).first,
                   candidate.confidence > Config.ocrMinConfidence else { continue }
@@ -628,7 +630,11 @@ final class Pipeline: ObservableObject {
                 .filter { !$0.isEmpty })
             let pos = position(ofMidX: obs.boundingBox.midX)
             // 목표 매칭은 일반 알림 필터보다 먼저 (목표는 무조건 알림)
-            if matchGoal(words: words, content: content, pos: pos) { continue }
+            if matchGoal(words: words, content: content, pos: pos) {
+                rememberSign(content: content, screenPos: pos, box: obs.boundingBox,
+                             depth: depth)
+                continue
+            }
             let isNav = !words.isDisjoint(with: Config.navWords)
             let isBig = obs.boundingBox.height >= Config.signMinHeight
             guard isNav || isBig else { continue }              // 의미있는 것만
@@ -639,9 +645,12 @@ final class Pipeline: ObservableObject {
             let now = Date()
             let seenBefore = signRecent[key]?.seen
             signRecent[key] = (now, pos, content)
+            // 공간 기억은 알림 여부와 무관하게 (되돌아가기용)
+            rememberSign(content: content, screenPos: pos, box: obs.boundingBox,
+                         depth: depth)
             if let seen = seenBefore,
                now.timeIntervalSince(seen) < Config.signRearmGap { continue }
-            logEpisode("\(content) sign", pos: pos)   // 지나온 표지판 기억 (알림 여부와 무관)
+            logEpisode("\(content) sign", pos: pos)
             if now.timeIntervalSince(lastAnnounceAt) < Config.announceGap { continue }
             lastAnnounceAt = now
             speak("Sign detected: \(content), \(spoken(position(ofMidX: obs.boundingBox.midX)))",
@@ -675,13 +684,34 @@ final class Pipeline: ObservableObject {
 
     /// YOLO 탐지 → ARKit 월드 좌표 메모리 (GPS 대신).
     private func rememberObject(label: String, screenPos: String, depthM: Double) {
+        storeMemory(label: label, screenPos: screenPos, depthM: depthM, isSign: false)
+    }
+
+    /// 표지판 OCR → 월드 좌표 메모리 (EXIT/restroom 등 되돌아가기).
+    private func rememberSign(content: String, screenPos: String, box: CGRect,
+                              depth: CVPixelBuffer?) {
+        let depthM: Double
+        if let depth, let m = medianDepth(depth, box: box) {
+            depthM = m
+        } else {
+            // 깊이 없으면 글자 크기로 대략 추정 (클수록 가까움)
+            let h = max(0.02, Double(box.height))
+            depthM = min(Config.objectMemoryMaxDepthM,
+                         max(Config.objectMemoryMinDepthM, 0.45 / h))
+        }
+        storeMemory(label: content, screenPos: screenPos, depthM: depthM, isSign: true)
+    }
+
+    private func storeMemory(label: String, screenPos: String, depthM: Double,
+                             isSign: Bool) {
         guard depthM >= Config.objectMemoryMinDepthM,
               depthM <= Config.objectMemoryMaxDepthM,
               let pose = lastPose else { return }
+        let key = (isSign ? "sign:" : "obj:") + label.lowercased()
         let now = Date()
-        if let last = lastObjectMemoryAt[label],
-           now.timeIntervalSince(last) < 2.0 { return }   // 라벨당 스로틀
-        lastObjectMemoryAt[label] = now
+        if let last = lastObjectMemoryAt[key],
+           now.timeIntervalSince(last) < 2.0 { return }
+        lastObjectMemoryAt[key] = now
 
         let right = simd_normalize(simd_cross(pose.forward, SIMD3<Float>(0, 1, 0)))
         let lateral: Float
@@ -696,9 +726,11 @@ final class Pipeline: ObservableObject {
         objectMemories.removeAll {
             now.timeIntervalSince($0.seenAt) > Config.objectMemoryMaxAgeSec
         }
-        // 같은 라벨은 최신 위치로 갱신
-        objectMemories.removeAll { $0.label == label }
-        objectMemories.append(ObjectMemory(label: label, position: world, seenAt: now))
+        objectMemories.removeAll {
+            $0.label.lowercased() == label.lowercased() && $0.isSign == isSign
+        }
+        objectMemories.append(ObjectMemory(label: label, position: world,
+                                           seenAt: now, isSign: isSign))
         if objectMemories.count > Config.objectMemoryMax {
             objectMemories.removeFirst(objectMemories.count - Config.objectMemoryMax)
         }
@@ -731,12 +763,11 @@ final class Pipeline: ObservableObject {
         let memories = objectMemories
         memoryLock.unlock()
 
-        // 질문에 포함된 라벨 중 가장 최근 기억
+        // 질문에 포함된 물체/표지판 중 가장 최근 기억
         let match = memories
-            .filter { lower.contains($0.label) || synonymMatch(lower, label: $0.label) }
+            .filter { memoryMatches(question: lower, mem: $0) }
             .max(by: { $0.seenAt < $1.seenAt })
         guard let mem = match else {
-            // 라벨을 못 고르면 가장 최근 물체로 안내 시도하지 않음
             return "I don't have a saved place for that yet. Point the camera at it once and I'll remember."
         }
 
@@ -744,15 +775,18 @@ final class Pipeline: ObservableObject {
         let delta = mem.position - pose.pos
         var flat = SIMD3<Float>(delta.x, 0, delta.z)
         let dist = simd_length(flat)
+        let noun = mem.isSign ? "\(mem.label) sign" : mem.label
         guard dist > 0.15 else {
-            return "Your \(mem.label) should be right here, within about a step."
+            return mem.isSign
+                ? "The \(noun) should be right here, within about a step."
+                : "Your \(noun) should be right here, within about a step."
         }
         flat /= dist
 
         let forward = pose.forward
         let right = simd_normalize(simd_cross(forward, SIMD3<Float>(0, 1, 0)))
-        let ahead = simd_dot(flat, forward)     // +앞 / -뒤
-        let side = simd_dot(flat, right)        // +오른 / -왼
+        let ahead = simd_dot(flat, forward)
+        let side = simd_dot(flat, right)
         let meters = max(1, Int(dist.rounded()))
         let agePhrase: String
         if age < 15 { agePhrase = "a moment ago" }
@@ -771,11 +805,29 @@ final class Pipeline: ObservableObject {
                 : side > 0.25 ? "ahead on your right"
                 : "ahead of you"
         }
-        return "Your \(mem.label) is about \(meters) meter\(meters > 1 ? "s" : "") \(turn). I saw it \(agePhrase)."
+        if mem.isSign {
+            return "The \(noun) is about \(meters) meter\(meters > 1 ? "s" : "") \(turn). I saw it \(agePhrase)."
+        }
+        return "Your \(noun) is about \(meters) meter\(meters > 1 ? "s" : "") \(turn). I saw it \(agePhrase)."
+    }
+
+    private func memoryMatches(question q: String, mem: ObjectMemory) -> Bool {
+        let label = mem.label.lowercased()
+        if q.contains(label) { return true }
+        if mem.isSign {
+            // "exit sign", "the restroom" 등 — 표지판 단어가 질문에 있으면 매칭
+            let tokens = label.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 2 }
+            if tokens.contains(where: { q.contains($0) }) { return true }
+            if q.contains("sign"), tokens.contains(where: { Config.navWords.contains($0) }) {
+                return true
+            }
+            return false
+        }
+        return synonymMatch(q, label: label)
     }
 
     private func synonymMatch(_ q: String, label: String) -> Bool {
-        // 흔한 별칭
         let aliases: [String: [String]] = [
             "backpack": ["bag", "backpack", "rucksack"],
             "handbag": ["purse", "handbag", "bag"],

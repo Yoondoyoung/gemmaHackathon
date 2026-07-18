@@ -35,7 +35,14 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "ar.camera")
     private var lastStructureAt = Date.distantPast
+    private var lastAutoSaveAt = Date.distantPast
+    private var trackingNormal = false
+    private var savingMap = false
+    private var lifecycleObservers: [NSObjectProtocol] = []
     private static let structurePeriod: TimeInterval = 0.4   // 메쉬 스캔 부하↓
+    /// tracking normal + 메쉬 있을 때 주기 자동저장
+    private static let autoSavePeriod: TimeInterval = 20
+    private static let autoSaveMinMeshAnchors = 2
 
     private static let screenCenterMinX: CGFloat = 1.0 / 3.0
     private static let screenCenterMaxX: CGFloat = 2.0 / 3.0
@@ -62,13 +69,15 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
             .appendingPathComponent("visionassist_world.map")
     }
 
-    func start(withSavedMap: Bool = false) {
+    func start(withSavedMap: Bool = true) {
         guard Self.isSupported else { return }
+        observeAppLifecycle()
         queue.async {
             let config = self.makeConfig()
+            // 저장된 맵이 있으면 자동으로 불러와 재로컬라이즈 시도
             if withSavedMap, let map = self.loadMapFromDisk() {
                 config.initialWorldMap = map
-                DispatchQueue.main.async { self.mapStatus = "map: relocalizing…" }
+                DispatchQueue.main.async { self.mapStatus = "map: autosaved map — look around" }
             }
             self.session.delegate = self
             self.session.delegateQueue = self.queue
@@ -79,31 +88,76 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
 
     func pause() { session.pause() }
 
-    /// 현재 공간 특징점+앵커를 Documents에 저장 (완전 온디바이스, 인터넷 불필요).
+    /// 수동 저장 (버튼). 자동저장과 동일 파일.
     func saveWorldMap() {
+        persistWorldMap(reason: "saved")
+    }
+
+    /// tracking이 안정적이고 메쉬가 쌓였을 때만 디스크에 씀.
+    private func persistWorldMap(reason: String) {
+        guard !savingMap else { return }
+        savingMap = true
         session.getCurrentWorldMap { [weak self] map, error in
             guard let self else { return }
+            defer { self.savingMap = false }
             if let error {
-                DispatchQueue.main.async { self.mapStatus = "map save failed: \(error.localizedDescription)" }
+                if reason == "saved" {   // 수동일 때만 에러 표시 (자동은 조용히)
+                    DispatchQueue.main.async {
+                        self.mapStatus = "map save failed: \(error.localizedDescription)"
+                    }
+                }
                 return
             }
             guard let map else {
-                DispatchQueue.main.async { self.mapStatus = "map save failed: empty" }
+                if reason == "saved" {
+                    DispatchQueue.main.async { self.mapStatus = "map save failed: empty" }
+                }
+                return
+            }
+            // 너무 빈약한 맵은 덮어쓰지 않음
+            if map.anchors.filter({ $0 is ARMeshAnchor }).count < Self.autoSaveMinMeshAnchors,
+               reason != "saved" {
                 return
             }
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map,
                                                             requiringSecureCoding: true)
                 try data.write(to: Self.mapURL, options: .atomic)
+                self.lastAutoSaveAt = Date()
                 DispatchQueue.main.async {
-                    self.mapStatus = "map saved (\(data.count / 1024)KB)"
+                    self.mapStatus = "map \(reason) (\(data.count / 1024)KB)"
                 }
             } catch {
-                DispatchQueue.main.async {
-                    self.mapStatus = "map save failed: \(error.localizedDescription)"
+                if reason == "saved" {
+                    DispatchQueue.main.async {
+                        self.mapStatus = "map save failed: \(error.localizedDescription)"
+                    }
                 }
             }
         }
+    }
+
+    private func maybeAutoSave(frame: ARFrame) {
+        guard trackingNormal else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastAutoSaveAt) >= Self.autoSavePeriod else { return }
+        let meshCount = frame.anchors.compactMap { $0 as? ARMeshAnchor }.count
+        guard meshCount >= Self.autoSaveMinMeshAnchors else { return }
+        persistWorldMap(reason: "autosaved")
+    }
+
+    private func observeAppLifecycle() {
+        guard lifecycleObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        let bg = center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                    object: nil, queue: nil) { [weak self] _ in
+            self?.persistWorldMap(reason: "autosaved")
+        }
+        let resign = center.addObserver(forName: UIApplication.willResignActiveNotification,
+                                        object: nil, queue: nil) { [weak self] _ in
+            self?.persistWorldMap(reason: "autosaved")
+        }
+        lifecycleObservers = [bg, resign]
     }
 
     /// 저장된 맵으로 세션 재시작 → 같은 공간이면 재로컬라이즈.
@@ -152,6 +206,7 @@ extension ARCameraManager: ARSessionDelegate {
         let hits = scanStructures(frame: frame)
         onStructures?(StructureUpdate(hits: hits, cameraPosition: position,
                                       cameraForward: forward))
+        maybeAutoSave(frame: frame)
     }
 
     static func pose(from cam: simd_float4x4) -> (SIMD3<Float>, SIMD3<Float>) {
@@ -163,18 +218,23 @@ extension ARCameraManager: ARSessionDelegate {
     }
 
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
-        DispatchQueue.main.async {
-            switch camera.trackingState {
-            case .normal:
-                if self.mapStatus.contains("relocaliz") || self.mapStatus.contains("loaded") {
+        switch camera.trackingState {
+        case .normal:
+            trackingNormal = true
+            DispatchQueue.main.async {
+                if self.mapStatus.contains("autosaved map") || self.mapStatus.contains("loaded")
+                    || self.mapStatus.contains("relocaliz") {
                     self.mapStatus = "map: tracking OK"
                 }
-            case .limited(let reason):
-                self.mapStatus = "tracking limited: \(reason)"
-            case .notAvailable:
-                self.mapStatus = "tracking unavailable"
-            @unknown default: break
             }
+        case .limited(let reason):
+            trackingNormal = false
+            DispatchQueue.main.async { self.mapStatus = "tracking limited: \(reason)" }
+        case .notAvailable:
+            trackingNormal = false
+            DispatchQueue.main.async { self.mapStatus = "tracking unavailable" }
+        @unknown default:
+            break
         }
     }
 }
