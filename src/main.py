@@ -43,6 +43,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", help="웹캠 대신 비디오 파일 (테스트 하네스)")
     ap.add_argument("--no-florence", action="store_true", help="OCR 비활성 (P0만)")
+    ap.add_argument("--no-depth", action="store_true", help="미터 깊이 비활성")
     ap.add_argument("--mute", action="store_true", help="TTS를 print로만")
     args = ap.parse_args()
 
@@ -62,6 +63,11 @@ def main():
     threading.Thread(target=yolo_worker.run_loop, daemon=True,
                      args=(camera, scene, AlertEngine(), speaker, stop, shared)
                      ).start()
+
+    if config.DEPTH_ENABLED and not args.no_depth:
+        from src.vision import depth_worker
+        threading.Thread(target=depth_worker.run_loop, daemon=True,
+                         args=(camera, shared, stop)).start()
 
     last_announce = [0.0]
 

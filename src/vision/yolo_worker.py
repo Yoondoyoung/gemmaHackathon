@@ -7,6 +7,20 @@ from src import config
 from src.scene_state import _dist_of
 
 
+def _bbox_depth(depth_entry, x1, y1, x2, y2, w, h):
+    """깊이 맵에서 bbox 중앙 50% 영역의 중앙값(미터). 깊이 맵 없으면 None."""
+    if depth_entry is None:
+        return None
+    import numpy as np
+    dmap, _ = depth_entry
+    dh, dw = dmap.shape
+    qx, qy = (x2 - x1) / 4, (y2 - y1) / 4          # 가장자리 25% 제외 (배경 오염 방지)
+    ix1, ix2 = int((x1 + qx) * dw / w), int((x2 - qx) * dw / w)
+    iy1, iy2 = int((y1 + qy) * dh / h), int((y2 - qy) * dh / h)
+    region = dmap[max(iy1, 0):max(iy2, 1), max(ix1, 0):max(ix2, 1)]
+    return float(np.median(region)) if region.size else None
+
+
 def load_model():
     from ultralytics import YOLO
     try:
@@ -28,6 +42,7 @@ def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
                           conf=config.YOLO_CONF, verbose=False,
                           tracker="bytetrack.yaml")[0]
         h, w = res.orig_shape
+        depth_entry = shared.get("depth")
         detections = []
         for box in res.boxes:
             if box.id is None:          # 트래킹 미확정 박스는 스킵
@@ -41,12 +56,15 @@ def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
             detections.append({"track_id": int(box.id), "label": label,
                                "pos": pos, "bbox_h_ratio": (y2 - y1) / h,
                                "bottom": y2 / h,
+                               "depth_m": _bbox_depth(depth_entry, x1, y1, x2, y2, w, h),
                                "_xy": (int(x1), int(y1))})
         for sentence in alert_engine.process(scene.update_objects(detections)):
             speaker.say(sentence, priority=0)
         overlay = res.plot()
         for d in detections:      # 거리 판정 표시 (리허설 캘리브레이션용)
-            tag = f"{_dist_of(d['label'], d['bbox_h_ratio'], d['bottom'])} h={d['bbox_h_ratio']:.2f}"
+            dist = _dist_of(d["label"], d["bbox_h_ratio"], d["bottom"], d["depth_m"])
+            tag = f"{dist} {d['depth_m']:.1f}m" if d["depth_m"] is not None \
+                else f"{dist} h={d['bbox_h_ratio']:.2f}"
             cv2.putText(overlay, tag, (d["_xy"][0], max(d["_xy"][1] - 6, 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
         shared["overlay"] = overlay

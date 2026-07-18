@@ -23,6 +23,14 @@ MED_THRESH = {"person": 0.30, "chair": 0.28,
               "bus": 0.55, "truck": 0.55, "default": 0.30}
 NEAR_BOTTOM_MIN = 0.75               # near 판정 추가 조건: bbox 하단이 프레임 하단 25% 안
                                      # (멀리 있는 대형 물체는 화면 중간에 떠 있음)
+
+# 미터 단위 깊이 (Depth Anything V2 metric-indoor, 실측 192ms/frame @MPS)
+# 깊이 맵이 있으면 bbox 휴리스틱 대신 이걸로 near/medium/far 판정 + 경고에 미터 포함
+DEPTH_ENABLED = True
+DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
+DEPTH_PERIOD_SEC = 1.0
+DEPTH_NEAR_M = 1.5                   # 이내면 near
+DEPTH_MED_M = 3.5                    # 이내면 medium
 CLOSING_RATE = 0.15                  # bbox_h_ratio 초당 증가율 → approaching
 GONE_AFTER_MISSES = 5                # 연속 미검출 프레임 수 → 객체 제거
 
