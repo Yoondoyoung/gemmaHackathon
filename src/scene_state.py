@@ -89,6 +89,9 @@ class SceneState:
                                None, t["content"].strip().lower(), key
                            ).ratio() >= config.TEXT_SIMILARITY), None)
                 if ex:
+                    # 시야에서 한동안 사라졌다 재등장한 표지판은 다시 '새 표지판'으로 알림
+                    if now - ex["ts"] > config.TEXT_REANNOUNCE_GAP:
+                        fresh.append(dict(it))
                     ex["ts"], ex["pos"] = now, it["pos"]
                 else:
                     self._texts.append({"content": it["content"],

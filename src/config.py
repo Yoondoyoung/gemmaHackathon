@@ -29,6 +29,7 @@ ANNOUNCE_MAX_WORDS = 3               # 이보다 긴 텍스트는 저장만 (OCR
 ANNOUNCE_MAX_CHARS = 20
 ANNOUNCE_MIN_INTERVAL = 4.0          # 표지판 알림 전역 최소 간격
 TEXT_SIMILARITY = 0.75               # OCR 지터 dedupe 임계 (difflib ratio)
+TEXT_REANNOUNCE_GAP = 10.0           # 시야에서 이 시간 이상 사라졌다 재등장하면 재알림
 GOAL_ENABLED = True                  # 목표 기억 (표지판 자동 매칭)
 
 FLORENCE_MODEL = "microsoft/Florence-2-base"

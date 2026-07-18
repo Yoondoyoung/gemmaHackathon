@@ -60,6 +60,7 @@ class Florence:
 def run_loop(camera, scene, on_new_texts, stop_flag, florence):
     """FLORENCE_PERIOD_SEC마다 최신 프레임 1장 OCR → 처음 보는 텍스트는 콜백."""
     while not stop_flag.is_set():
+        t0 = time.time()
         frame = camera.latest()
         if frame is not None:
             try:
@@ -68,7 +69,8 @@ def run_loop(camera, scene, on_new_texts, stop_flag, florence):
                     on_new_texts(fresh)
             except Exception as e:
                 print(f"[florence] 오류 (계속 진행): {e}")
-        stop_flag.wait(config.FLORENCE_PERIOD_SEC)
+        # 고정 레이트: OCR 소요 시간을 주기에서 차감 (실효 주기 = max(주기, OCR 시간))
+        stop_flag.wait(max(0.1, config.FLORENCE_PERIOD_SEC - (time.time() - t0)))
 
 
 if __name__ == "__main__":
