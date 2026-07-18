@@ -63,9 +63,15 @@ FLORENCE_MODEL = "microsoft/Florence-2-base"
 FLORENCE_PERIOD_SEC = 2.5
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-GEMMA_MODEL = "gemma3:4b"
+GEMMA_MODEL = "gemma4:e2b"
 GEMMA_MAX_TOKENS = 80
-GEMMA_TIMEOUT_SEC = 30
+GEMMA_TIMEOUT_SEC = 45
+# gemma4는 thinking 모델 — True면 num_predict가 생각에 소진되어 답이 빈 문자열이 됨
+GEMMA_THINK = False
+# b 질문 시 장면 JSON + 카메라 프레임을 함께 전송 (정확도↑, 지연 약간↑)
+GEMMA_SEND_IMAGE = True
+GEMMA_IMAGE_MAX_W = 480          # 전송 전 리사이즈 (원본 640→지연·토큰 절감)
+GEMMA_IMAGE_JPEG_Q = 70
 
 WHISPER_MODEL = "small.en"
 SAMPLE_RATE = 16000

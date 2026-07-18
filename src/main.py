@@ -29,21 +29,43 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _FRAME_DUMP_DIR = _ROOT / config.GEMMA_FRAME_DUMP_DIR
 
 
-def _save_gemma_frame(question: str, scene_json: str) -> pathlib.Path:
-    """b 질문 시 Gemma에 전달된 장면 스냅샷을 번호 증가 파일로 저장."""
-    _FRAME_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+def _next_frame_index() -> int:
     n = 0
-    for p in _FRAME_DUMP_DIR.glob("*.json"):
+    for p in _FRAME_DUMP_DIR.glob("*_frame.*"):
         prefix = p.stem.split("_", 1)[0]
         if prefix.isdigit():
             n = max(n, int(prefix))
-    path = _FRAME_DUMP_DIR / f"{n + 1}_frame.json"
+    return n + 1
+
+
+def _save_gemma_frame(question: str, scene_json: str, frame=None) -> pathlib.Path:
+    """b 질문 시 Gemma에 전달된 장면 스냅샷(+이미지)을 번호 증가 파일로 저장."""
+    _FRAME_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+    idx = _next_frame_index()
+    path = _FRAME_DUMP_DIR / f"{idx}_frame.json"
+    has_image = False
+    if frame is not None:
+        img_path = _FRAME_DUMP_DIR / f"{idx}_frame.jpg"
+        try:
+            h, w = frame.shape[:2]
+            max_w = config.GEMMA_IMAGE_MAX_W
+            out = frame
+            if w > max_w:
+                scale = max_w / w
+                out = cv2.resize(frame, (max_w, int(h * scale)))
+            cv2.imwrite(str(img_path), out,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), config.GEMMA_IMAGE_JPEG_Q])
+            has_image = True
+        except Exception as e:
+            print(f"[frame] 이미지 저장 실패: {e}")
     payload = {
         "question": question,
         "scene": json.loads(scene_json),
+        "image": f"{idx}_frame.jpg" if has_image else None,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-    print(f"[frame] 저장 → {path.name}")
+    print(f"[frame] 저장 → {path.name}"
+          + (f" + {idx}_frame.jpg" if has_image else ""))
     return path
 
 DESCRIBE_WORDS = ("describe", "what do you see", "around me", "in front of")
@@ -161,23 +183,30 @@ def main():
                 state["last_qa"] = f"{time.time()-t0:.1f}s"
                 return
 
-            # B(일반 질문): 장면 스냅샷으로 Gemma 답변 (extract_goal 없음)
+            # B(일반 질문): 장면 JSON(+옵션 이미지)으로 Gemma 답변
+            frame = camera.latest()
             if florence and any(k in question.lower() for k in DESCRIBE_WORDS):
-                frame = camera.latest()
                 if frame is not None:
                     try:
                         scene.set_caption(florence.caption(frame))
                     except Exception:
                         pass
             snap = scene.snapshot_json()
-            _save_gemma_frame(question, snap)
+            image_b64 = None
+            if config.GEMMA_SEND_IMAGE:
+                image_b64 = gemma_client.encode_frame(frame)
+            _save_gemma_frame(question, snap, frame if image_b64 else None)
+            if image_b64:
+                print(f"[gemma] 이미지 포함 전송 ({config.GEMMA_IMAGE_MAX_W}px JPEG)")
             if _is_empty_seat_question(question):
-                answer = gemma_client.ask_streaming(question, snap, lambda _s: None)
+                answer = gemma_client.ask_streaming(
+                    question, snap, lambda _s: None, image_b64=image_b64)
                 speaker.say(answer.strip() if answer.strip()
                             else "Sorry, I couldn't process that.", 1)
             else:
                 gemma_client.ask_streaming(
-                    question, snap, lambda s: speaker.say(s, 1))
+                    question, snap, lambda s: speaker.say(s, 1),
+                    image_b64=image_b64)
             scene.set_caption(None)
             state["last_qa"] = f"{time.time()-t0:.1f}s"
         finally:
