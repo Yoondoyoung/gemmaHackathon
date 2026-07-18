@@ -107,13 +107,20 @@ struct ContentView: View {
                         guard pushToTalkEnabled, speechIn.state == .idle else { return }
                         isPressingTalk = true
                         speechIn.begin { question in
-                            // 목적지 발화면 목표 설정(표지판 교차검증), 아니면 장면 Q&A
-                            if let goal = Pipeline.extractGoal(from: question) {
+                            // 1) 회상 질문("아까 지나쳤어?")이면 에피소드 기억으로 답변
+                            //    — 목표 판별보다 먼저 (목적지 단어가 들어있어도 회상 우선)
+                            if Pipeline.isRecallQuestion(question) {
+                                gemma.ask(question,
+                                          scene: pipeline.snapshotJSON(includeHistory: true),
+                                          imageJPEG: nil)   // 회상은 과거 → 현재 프레임 불필요
+                            // 2) 목적지 발화면 목표 설정 (표지판 교차검증)
+                            } else if let goal = Pipeline.extractGoal(from: question) {
                                 pipeline.setGoal(spoken: goal.spoken,
                                                  keywords: goal.keywords)
                                 SpeechOut.shared.say(
                                     "Looking for the \(goal.spoken). "
                                     + "I'll tell you when I see a sign.", priority: 1)
+                            // 3) 그 외 현재 장면 Q&A
                             } else {
                                 gemma.ask(question,
                                           scene: pipeline.snapshotJSON(),

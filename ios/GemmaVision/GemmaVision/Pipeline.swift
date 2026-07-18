@@ -9,15 +9,23 @@ import UIKit
 import Vision
 
 enum Config {
+    // src/config.py TRACK_LABELS와 동기 — 음식·스포츠 잡음 클래스는 제외
     static let trackLabels: Set<String> = [
-        "person", "chair", "bicycle", "car", "dog", "backpack", "suitcase",
-        "bench", "potted plant", "couch", "dining table", "bus", "truck",
-        "motorcycle", "traffic light", "stop sign",
-        "umbrella", "skateboard", "fire hydrant", "parking meter"]
+        "person", "dog", "cat",
+        "bicycle", "car", "motorcycle", "bus", "truck", "train",
+        "traffic light", "stop sign", "fire hydrant", "parking meter",
+        "chair", "couch", "bench", "bed", "dining table", "toilet",
+        "potted plant", "tv", "refrigerator", "oven", "microwave", "sink",
+        "backpack", "handbag", "suitcase", "umbrella", "cell phone",
+        "laptop", "keyboard", "mouse", "remote", "book", "bottle", "cup",
+        "skateboard", "clock", "vase"]
     static let nearThresh: [String: CGFloat] = [
         "person": 0.60, "chair": 0.50, "bicycle": 0.55, "dining table": 0.80,
-        "couch": 0.80, "bench": 0.70, "car": 0.70, "bus": 0.85, "truck": 0.85,
-        "umbrella": 0.55, "skateboard": 0.35,
+        "couch": 0.80, "bench": 0.70, "bed": 0.85, "car": 0.70, "bus": 0.85,
+        "truck": 0.85, "train": 0.85, "tv": 0.55, "refrigerator": 0.80,
+        "oven": 0.55, "sink": 0.50, "toilet": 0.50, "laptop": 0.35,
+        "bottle": 0.30, "cup": 0.25, "cell phone": 0.20, "book": 0.30,
+        "clock": 0.30, "vase": 0.40, "umbrella": 0.55, "skateboard": 0.35,
         "fire hydrant": 0.45, "parking meter": 0.45]
     static let defaultNear: CGFloat = 0.55
     static let nearBottomMaxY: CGFloat = 0.25    // Vision 좌표(원점 좌하단): minY < 0.25 = 바닥 접점
@@ -55,6 +63,17 @@ enum Config {
     static let goalIntentPhrases: [String] = [
         "go to", "get to", "take me to", "looking for", "find the", "find a",
         "find me", "where is", "where's", "need the", "need a", "want to go to"]
+
+    // 에피소드 기억: 지나온 표지판·물체를 몇 분간 누적 → "아까 지나쳤어?" 류 질문에만 사용
+    static let episodeMaxAgeSec: TimeInterval = 300     // 5분 창
+    static let episodeMaxCount = 40                     // 로그 상한
+    static let episodeInPromptMax = 15                  // 프롬프트에 넣는 최대 개수
+    static let episodeObjectCooldown: TimeInterval = 8  // 같은 라벨 물체 재기록 간격
+    // 회상 질문 판별 — 이 문구가 있으면 현재 장면 대신(추가로) 에피소드 로그를 Gemma에 전달
+    static let recallPhrases: [String] = [
+        "did we", "did i", "did you see", "have we", "earlier", "a moment ago",
+        "back there", "we passed", "passed a", "passed the", "was there",
+        "behind us", "just passed", "go back", "on the way"]
     static let announceGap: TimeInterval = 4
     /// YOLO26 end2end 입력 해상도 (CoreML imgsz).
     static let yoloInput: CGFloat = 640
@@ -97,6 +116,10 @@ final class Pipeline: ObservableObject {
     var inputOrientation: CGImagePropertyOrientation = .right
     private let goalLock = NSLock()
     private var goalKeywords: Set<String> = []   // handleTexts(백그라운드)에서 매칭
+    // 에피소드 기억 (지나온 것들) — 백그라운드에서 기록, 질문 시 읽음
+    private let episodeLock = NSLock()
+    private var episodes: [(t: Date, what: String, pos: String)] = []
+    private var lastObjectEpisode: [String: Date] = [:]
 
     private var model: VNCoreMLModel?
     private var lastAlertByLabel: [String: Date] = [:]
@@ -244,6 +267,9 @@ final class Pipeline: ObservableObject {
             newBoxes.append(DetBox(id: idx, visionBox: box,
                                    text: "\(det.label) \(tag)",
                                    alert: near && pos == "center"))
+            // 에피소드 기억은 경고보다 느슨하게 — near뿐 아니라 medium(수 m 내)도,
+            // 어느 쪽(좌/중/우)이든 '지나친 것'으로 기록 (경고는 여전히 near+center만).
+            if dist != "far" { logObjectPassed(det.label, pos: pos) }
             guard near, pos == "center" else { continue }
             // Q&A 답변 재생 중엔 경고를 내지 않는다 (쿨다운도 소진 안 함 —
             // 답변 끝난 뒤 여전히 가까우면 즉시 다시 경고).
@@ -326,7 +352,7 @@ final class Pipeline: ObservableObject {
     }
 
     /// Gemma 프롬프트용 장면 스냅샷 (Mac판 SceneState.snapshot_json 축소 이식)
-    func snapshotJSON() -> String {
+    func snapshotJSON(includeHistory: Bool = false) -> String {
         let objs = lastObjects.map {
             "{\"label\": \"\($0.label)\", \"pos\": \"\($0.pos)\", \"dist\": \"\($0.dist)\"}"
         }
@@ -339,8 +365,12 @@ final class Pipeline: ObservableObject {
                 "{\"content\": \"\($0.content)\", \"pos\": \"\($0.pos)\", " +
                 "\"age_sec\": \(Int(now.timeIntervalSince($0.seen)))}"
             }
-        return "{\"objects\": [\(objs.joined(separator: ", "))], " +
-               "\"texts\": [\(texts.joined(separator: ", "))]}"
+        var json = "{\"objects\": [\(objs.joined(separator: ", "))], " +
+                   "\"texts\": [\(texts.joined(separator: ", "))]"
+        if includeHistory {   // 회상 질문에만 — 지나온 것들의 기록
+            json += ", \"recent_history\": \(recentHistoryJSON())"
+        }
+        return json + "}"
     }
 
     // MARK: - 표지판 (Vision OCR — 알림 가치 필터는 Mac판 worth_announcing 이식)
@@ -369,11 +399,57 @@ final class Pipeline: ObservableObject {
             signRecent[key] = (now, pos, content)
             if let seen = seenBefore,
                now.timeIntervalSince(seen) < Config.signRearmGap { continue }
+            logEpisode("\(content) sign", pos: pos)   // 지나온 표지판 기억 (알림 여부와 무관)
             if now.timeIntervalSince(lastAnnounceAt) < Config.announceGap { continue }
             lastAnnounceAt = now
             speak("Sign detected: \(content), \(spoken(position(ofMidX: obs.boundingBox.midX)))",
                   priority: 1)
         }
+    }
+
+    // MARK: - 에피소드 기억 (지나온 것들)
+
+    private func logEpisode(_ what: String, pos: String) {
+        let now = Date()
+        episodeLock.lock()
+        episodes.append((now, what, pos))
+        episodes.removeAll { now.timeIntervalSince($0.t) > Config.episodeMaxAgeSec }
+        if episodes.count > Config.episodeMaxCount {
+            episodes.removeFirst(episodes.count - Config.episodeMaxCount)
+        }
+        episodeLock.unlock()
+    }
+
+    /// 가까이 지나친 물체를 라벨별 쿨다운으로 기록 ("passed a chair on your left").
+    private func logObjectPassed(_ label: String, pos: String) {
+        let now = Date()
+        episodeLock.lock()
+        let recent = lastObjectEpisode[label]
+        let ok = recent == nil || now.timeIntervalSince(recent!) > Config.episodeObjectCooldown
+        if ok { lastObjectEpisode[label] = now }
+        episodeLock.unlock()
+        if ok { logEpisode("a \(label)", pos: pos) }
+    }
+
+    /// 회상 질문이면 true → 프롬프트에 recent_history 포함.
+    static func isRecallQuestion(_ q: String) -> Bool {
+        let lower = q.lowercased()
+        return Config.recallPhrases.contains { lower.contains($0) }
+    }
+
+    private func recentHistoryJSON() -> String {
+        let now = Date()
+        episodeLock.lock()
+        let evs = episodes
+            .filter { now.timeIntervalSince($0.t) <= Config.episodeMaxAgeSec }
+            .suffix(Config.episodeInPromptMax)
+            .reversed()   // 최근 것부터
+        episodeLock.unlock()
+        let items = evs.map {
+            "{\"what\": \"\($0.what)\", \"pos\": \"\($0.pos)\", " +
+            "\"age_sec\": \(Int(now.timeIntervalSince($0.t)))}"
+        }
+        return "[\(items.joined(separator: ", "))]"
     }
 
     // MARK: - 목표(목적지) 기억
