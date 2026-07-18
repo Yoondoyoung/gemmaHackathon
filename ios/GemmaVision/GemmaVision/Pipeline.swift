@@ -5,6 +5,7 @@ import CoreImage
 import CoreML
 import CoreVideo
 import Foundation
+import simd
 import UIKit
 import Vision
 
@@ -40,6 +41,19 @@ enum Config {
     static let pathClearCooldown: TimeInterval = 12
     /// 갈림길/측면 통로 안내 (같은 형태 재알림 쿨다운)
     static let forkCooldown: TimeInterval = 18
+    /// 저장된 갈림길 웨이포인트에 이 거리 안으로 들어오면 "지나침" 안내
+    static let forkPassRadiusM: Float = 1.4
+    static let forkPassCooldown: TimeInterval = 25
+    static let forkWaypointMax = 12
+    /// YOLO 물체를 ARKit 월드 좌표에 찍어 "다시 가기" 안내용 (GPS 아님)
+    static let objectMemoryMaxAgeSec: TimeInterval = 180
+    static let objectMemoryMax = 30
+    static let objectMemoryMinDepthM: Double = 0.5
+    static let objectMemoryMaxDepthM: Double = 6.0
+    static let findBackPhrases: [String] = [
+        "where is my", "where's my", "where is the", "where's the",
+        "find my", "find the", "take me back", "go back to", "guide me to",
+        "how do i get back", "lead me to"]
     static let confMin: Float = 0.4
     static let alertCooldown: TimeInterval = 5    // YOLO 라벨별 (ID churn 대응)
     static let alertGlobalGap: TimeInterval = 2
@@ -145,6 +159,23 @@ final class Pipeline: ObservableObject {
     private var lastStructures: [StructureHit] = []
     private var structureStatus = ""
     private var lastForkPos: String?   // rising-edge 감지용 (both/left/right)
+    // ARKit 월드 좌표 갈림길 기억 (GPS 아님 — 실내 온디바이스 궤적)
+    private struct ForkWaypoint {
+        let position: SIMD3<Float>
+        let side: String          // left | right | both
+        var announcedPass: Bool
+    }
+    private var forkWaypoints: [ForkWaypoint] = []
+    // 물체 공간 기억 (backpack 등) — AR 월드 좌표
+    private struct ObjectMemory {
+        let label: String
+        let position: SIMD3<Float>
+        let seenAt: Date
+    }
+    private let memoryLock = NSLock()
+    private var objectMemories: [ObjectMemory] = []
+    private var lastPose: (pos: SIMD3<Float>, forward: SIMD3<Float>)?
+    private var lastObjectMemoryAt: [String: Date] = [:]
     // Q&A용 최신 프레임 (JPEG). 탐지 루프에서 스로틀 갱신.
     private let jpegLock = NSLock()
     private var latestJPEG: Data?
@@ -175,7 +206,9 @@ final class Pipeline: ObservableObject {
         return latestJPEG
     }
 
-    func process(_ pixelBuffer: CVPixelBuffer, depth: CVPixelBuffer?) {
+    func process(_ pixelBuffer: CVPixelBuffer, depth: CVPixelBuffer?,
+                 pose: (SIMD3<Float>, SIMD3<Float>)? = nil) {
+        if let pose { lastPose = (pose.0, pose.1) }
         guard !processing, let model else { return }
         processing = true
         queue.async { [self] in
@@ -204,8 +237,10 @@ final class Pipeline: ObservableObject {
         }
     }
 
-    /// ARKit 메쉬 — 벽/문/창 경고 + 갈림길 + 직진 가능 안내 (LLM 금지).
-    func processStructures(_ hits: [StructureHit]) {
+    /// ARKit 메쉬 — 벽/문/창 경고 + 갈림길 + 지나침 + 직진 안내 (LLM 금지).
+    /// 경로는 GPS가 아니라 `update`의 ARKit 월드 좌표를 사용.
+    func processStructures(_ update: StructureUpdate) {
+        let hits = update.hits
         let hint = hits.prefix(5).map {
             String(format: "%@ %@ %.1fm", $0.label, $0.pos, $0.meters)
         }.joined(separator: " · ")
@@ -213,6 +248,10 @@ final class Pipeline: ObservableObject {
         lastStructures = hits
         structureStatus = hint
         structureLock.unlock()
+
+        lastPose = (update.cameraPosition, update.cameraForward)
+        // 저장된 갈림길 근처를 지나가면 안내
+        if announceForkPassIfNeeded(at: update.cameraPosition) { return }
 
         guard !SpeechOut.shared.suppressingWarnings else { return }
 
@@ -241,11 +280,11 @@ final class Pipeline: ObservableObject {
             return
         }
 
-        // 2) 갈림길 / 측면 통로 — 새로 나타날 때만 (rising edge)
+        // 2) 갈림길 — 확정된 fork가 새로 나타날 때만 + 월드 좌표에 웨이포인트 저장
         if let fork = hits.first(where: { $0.label == "fork" }) {
             let prev = lastForkPos
             lastForkPos = fork.pos
-            let appeared = prev != fork.pos   // nil→left, left→both 등
+            let appeared = prev != fork.pos
             if appeared {
                 let now = Date()
                 let key = "fork_\(fork.pos)"
@@ -254,6 +293,8 @@ final class Pipeline: ObservableObject {
                    now.timeIntervalSince(lastGlobalAlert) >= Config.alertGlobalGap {
                     lastAlertByLabel[key] = now
                     lastGlobalAlert = now
+                    rememberForkWaypoint(fork: fork, camera: update.cameraPosition,
+                                         forward: update.cameraForward)
                     let phrase: String
                     switch fork.pos {
                     case "both":
@@ -266,7 +307,8 @@ final class Pipeline: ObservableObject {
                         phrase = "Path splits ahead"
                     }
                     speak(phrase, priority: 1)
-                    logEpisode("fork \(fork.pos)", pos: fork.pos == "both" ? "center" : fork.pos)
+                    logEpisode("fork \(fork.pos)",
+                               pos: fork.pos == "both" ? "center" : fork.pos)
                     return
                 }
             }
@@ -274,7 +316,7 @@ final class Pipeline: ObservableObject {
             lastForkPos = nil
         }
 
-        // 3) 직진 바닥이 이어지고 앞에 막힘이 없으면 path clear
+        // 3) 직진 가능
         guard let floor = hits.first(where: { $0.label == "floor" && $0.pos == "center" }),
               floor.meters >= Config.pathClearMinFloorM else { return }
         let blocked = hits.contains {
@@ -293,6 +335,65 @@ final class Pipeline: ObservableObject {
         speak("Path clear ahead, about \(clearM) meter\(clearM > 1 ? "s" : "")",
               priority: 1)
         logEpisode("clear path", pos: "center")
+    }
+
+    /// 갈림길을 카메라 앞쪽 월드 좌표에 찍어 둔다 (세션 내 온디바이스 지도).
+    private func rememberForkWaypoint(fork: StructureHit, camera: SIMD3<Float>,
+                                      forward: SIMD3<Float>) {
+        let ahead = Float(min(fork.meters * 0.55, 2.5))
+        var pos = camera + forward * ahead
+        // 측면이면 약간 옆으로 치우쳐 저장
+        let right = simd_normalize(simd_cross(forward, SIMD3<Float>(0, 1, 0)))
+        if fork.pos == "left" { pos -= right * 0.8 }
+        if fork.pos == "right" { pos += right * 0.8 }
+        // 가까운 기존 포인트와 합치기
+        for i in forkWaypoints.indices {
+            if simd_distance(forkWaypoints[i].position, pos) < 1.2 {
+                forkWaypoints[i] = ForkWaypoint(position: pos, side: fork.pos,
+                                                announcedPass: false)
+                return
+            }
+        }
+        forkWaypoints.append(ForkWaypoint(position: pos, side: fork.pos,
+                                          announcedPass: false))
+        if forkWaypoints.count > Config.forkWaypointMax {
+            forkWaypoints.removeFirst(forkWaypoints.count - Config.forkWaypointMax)
+        }
+    }
+
+    /// 예전에 찍은 갈림길 근처를 지나가면 한 번 안내. true면 이 틱에서 발화함.
+    @discardableResult
+    private func announceForkPassIfNeeded(at camera: SIMD3<Float>) -> Bool {
+        guard !SpeechOut.shared.suppressingWarnings else { return false }
+        let now = Date()
+        if now.timeIntervalSince(lastAlertByLabel["fork_pass"] ?? .distantPast)
+            < Config.forkPassCooldown { return false }
+        if now.timeIntervalSince(lastGlobalAlert) < Config.alertGlobalGap { return false }
+
+        for i in forkWaypoints.indices {
+            let wp = forkWaypoints[i]
+            guard !wp.announcedPass else { continue }
+            let d = simd_distance(camera, wp.position)
+            guard d <= Config.forkPassRadiusM else { continue }
+            forkWaypoints[i].announcedPass = true
+            lastAlertByLabel["fork_pass"] = now
+            lastGlobalAlert = now
+            let phrase: String
+            switch wp.side {
+            case "both":
+                phrase = "You are at a junction — paths left and right"
+            case "left":
+                phrase = "You are passing a turn on your left"
+            case "right":
+                phrase = "You are passing a turn on your right"
+            default:
+                phrase = "You are passing a junction"
+            }
+            speak(phrase, priority: 1)
+            logEpisode("passed fork \(wp.side)", pos: "center")
+            return true
+        }
+        return false
     }
 
     private static func makeOCRRequest() -> VNRecognizeTextRequest {
@@ -374,7 +475,13 @@ final class Pipeline: ObservableObject {
                                    alert: near && pos == "center"))
             // 에피소드 기억은 경고보다 느슨하게 — near뿐 아니라 medium(수 m 내)도,
             // 어느 쪽(좌/중/우)이든 '지나친 것'으로 기록 (경고는 여전히 near+center만).
-            if dist != "far" { logObjectPassed(det.label, pos: pos) }
+            if dist != "far" {
+                logObjectPassed(det.label, pos: pos)
+                // LiDAR 깊이 + AR 포즈가 있으면 월드 좌표에 찍어 "다시 가기"에 사용
+                if let m = meters {
+                    rememberObject(label: det.label, screenPos: pos, depthM: m)
+                }
+            }
             guard near, pos == "center" else { continue }
             // Q&A 답변 재생 중엔 경고를 내지 않는다 (쿨다운도 소진 안 함 —
             // 답변 끝난 뒤 여전히 가까우면 즉시 다시 경고).
@@ -563,10 +670,119 @@ final class Pipeline: ObservableObject {
         if ok { logEpisode("a \(label)", pos: pos) }
     }
 
+    /// YOLO 탐지 → ARKit 월드 좌표 메모리 (GPS 대신).
+    private func rememberObject(label: String, screenPos: String, depthM: Double) {
+        guard depthM >= Config.objectMemoryMinDepthM,
+              depthM <= Config.objectMemoryMaxDepthM,
+              let pose = lastPose else { return }
+        let now = Date()
+        if let last = lastObjectMemoryAt[label],
+           now.timeIntervalSince(last) < 2.0 { return }   // 라벨당 스로틀
+        lastObjectMemoryAt[label] = now
+
+        let right = simd_normalize(simd_cross(pose.forward, SIMD3<Float>(0, 1, 0)))
+        let lateral: Float
+        switch screenPos {
+        case "left": lateral = -0.55
+        case "right": lateral = 0.55
+        default: lateral = 0
+        }
+        let world = pose.pos + pose.forward * Float(depthM) + right * lateral
+
+        memoryLock.lock()
+        objectMemories.removeAll {
+            now.timeIntervalSince($0.seenAt) > Config.objectMemoryMaxAgeSec
+        }
+        // 같은 라벨은 최신 위치로 갱신
+        objectMemories.removeAll { $0.label == label }
+        objectMemories.append(ObjectMemory(label: label, position: world, seenAt: now))
+        if objectMemories.count > Config.objectMemoryMax {
+            objectMemories.removeFirst(objectMemories.count - Config.objectMemoryMax)
+        }
+        memoryLock.unlock()
+    }
+
     /// 회상 질문이면 true → 프롬프트에 recent_history 포함.
     static func isRecallQuestion(_ q: String) -> Bool {
         let lower = q.lowercased()
         return Config.recallPhrases.contains { lower.contains($0) }
+    }
+
+    /// "where's my backpack / take me back to my bag" → 공간 안내 문장 (룰베이스).
+    static func isFindBackQuestion(_ q: String) -> Bool {
+        let lower = q.lowercased()
+        return Config.findBackPhrases.contains { lower.contains($0) }
+    }
+
+    /// 질문에서 찾을 라벨을 뽑아, 기억된 월드 좌표 기준으로 돌아갈 방향을 말함.
+    func guideBack(for question: String) -> String? {
+        guard let pose = lastPose else {
+            return "I can guide you once we have a room scan. Keep the camera moving for a moment."
+        }
+        let lower = question.lowercased()
+        memoryLock.lock()
+        let now = Date()
+        objectMemories.removeAll {
+            now.timeIntervalSince($0.seenAt) > Config.objectMemoryMaxAgeSec
+        }
+        let memories = objectMemories
+        memoryLock.unlock()
+
+        // 질문에 포함된 라벨 중 가장 최근 기억
+        let match = memories
+            .filter { lower.contains($0.label) || synonymMatch(lower, label: $0.label) }
+            .max(by: { $0.seenAt < $1.seenAt })
+        guard let mem = match else {
+            // 라벨을 못 고르면 가장 최근 물체로 안내 시도하지 않음
+            return "I don't have a saved place for that yet. Point the camera at it once and I'll remember."
+        }
+
+        let age = Int(now.timeIntervalSince(mem.seenAt).rounded())
+        let delta = mem.position - pose.pos
+        var flat = SIMD3<Float>(delta.x, 0, delta.z)
+        let dist = simd_length(flat)
+        guard dist > 0.15 else {
+            return "Your \(mem.label) should be right here, within about a step."
+        }
+        flat /= dist
+
+        let forward = pose.forward
+        let right = simd_normalize(simd_cross(forward, SIMD3<Float>(0, 1, 0)))
+        let ahead = simd_dot(flat, forward)     // +앞 / -뒤
+        let side = simd_dot(flat, right)        // +오른 / -왼
+        let meters = max(1, Int(dist.rounded()))
+        let agePhrase: String
+        if age < 15 { agePhrase = "a moment ago" }
+        else if age < 60 { agePhrase = "about \(age) seconds ago" }
+        else { agePhrase = "about \(max(1, age / 60)) minute\(age >= 120 ? "s" : "") ago" }
+
+        let turn: String
+        if ahead < -0.35 {
+            turn = side < -0.25 ? "behind you on your left"
+                : side > 0.25 ? "behind you on your right"
+                : "behind you"
+        } else if abs(side) > abs(ahead) {
+            turn = side < 0 ? "on your left" : "on your right"
+        } else {
+            turn = side < -0.25 ? "ahead on your left"
+                : side > 0.25 ? "ahead on your right"
+                : "ahead of you"
+        }
+        return "Your \(mem.label) is about \(meters) meter\(meters > 1 ? "s" : "") \(turn). I saw it \(agePhrase)."
+    }
+
+    private func synonymMatch(_ q: String, label: String) -> Bool {
+        // 흔한 별칭
+        let aliases: [String: [String]] = [
+            "backpack": ["bag", "backpack", "rucksack"],
+            "handbag": ["purse", "handbag", "bag"],
+            "cell phone": ["phone", "iphone", "cellphone", "cell phone"],
+            "laptop": ["laptop", "computer", "macbook"],
+            "bottle": ["bottle", "water"],
+            "suitcase": ["suitcase", "luggage"],
+        ]
+        let keys = aliases[label] ?? [label]
+        return keys.contains { q.contains($0) }
     }
 
     private func recentHistoryJSON() -> String {

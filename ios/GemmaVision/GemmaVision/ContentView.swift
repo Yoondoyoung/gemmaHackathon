@@ -39,6 +39,11 @@ struct ContentView: View {
                 }
                 Text(pipeline.statusLine)
                     .font(.caption.monospaced())
+                if useAR, !arCamera.mapStatus.isEmpty {
+                    Text(arCamera.mapStatus)
+                        .font(.caption2.monospaced())
+                        .foregroundColor(.white.opacity(0.75))
+                }
                 Text(pipeline.lastSpoken)
                     .font(.headline)
                     .foregroundColor(.yellow)
@@ -62,19 +67,33 @@ struct ContentView: View {
 
             if useAR {
                 VStack {
-                    HStack {
+                    HStack(spacing: 8) {
                         Spacer()
+                        Button("Save map") { arCamera.saveWorldMap() }
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.orange.opacity(0.85))
+                            .foregroundColor(.white)
+                            .clipShape(Capsule())
+                        Button("Load map") { arCamera.loadWorldMap() }
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.purple.opacity(0.85))
+                            .foregroundColor(.white)
+                            .clipShape(Capsule())
                         Button(showMesh ? "Mesh ON" : "Mesh OFF") {
                             showMesh.toggle()
                         }
                         .font(.caption.bold())
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(showMesh ? Color.green.opacity(0.85) : Color.gray.opacity(0.75))
                         .foregroundColor(.white)
                         .clipShape(Capsule())
-                        .padding(10)
                     }
+                    .padding(10)
                     Spacer()
                 }
             }
@@ -88,11 +107,13 @@ struct ContentView: View {
         }
         .onAppear {
             if useAR {
-                arCamera.onFrame = { pipeline.process($0, depth: $1) }
+                arCamera.onFrame = { pixel, depth, pos, fwd in
+                    pipeline.process(pixel, depth: depth, pose: (pos, fwd))
+                }
                 arCamera.onStructures = { pipeline.processStructures($0) }
-                arCamera.start()
+                arCamera.start(withSavedMap: false)
             } else {
-                camera.onFrame = { pipeline.process($0, depth: $1) }
+                camera.onFrame = { pipeline.process($0, depth: $1, pose: nil) }
                 camera.start()
             }
             gemma.load()
@@ -157,13 +178,17 @@ struct ContentView: View {
                         // 답변 TTS·Gemma 생성 중이면 먼저 끊고 듣기 시작
                         gemma.interrupt()
                         speechIn.begin { question in
-                            // 1) 회상 질문("아까 지나쳤어?")이면 에피소드 기억으로 답변
-                            //    — 목표 판별보다 먼저 (목적지 단어가 들어있어도 회상 우선)
-                            if Pipeline.isRecallQuestion(question) {
+                            // 1) "where's my backpack / take me back" → AR 월드 좌표로 돌아갈 방향
+                            //    (GPS 아님. YOLO 탐지 위치를 LiDAR+포즈로 저장해 둔 것)
+                            if Pipeline.isFindBackQuestion(question),
+                               let guide = pipeline.guideBack(for: question) {
+                                SpeechOut.shared.say(guide, priority: 1)
+                            // 2) 회상 질문("아까 지나쳤어?")이면 에피소드 기억으로 답변
+                            } else if Pipeline.isRecallQuestion(question) {
                                 gemma.ask(question,
                                           scene: pipeline.snapshotJSON(includeHistory: true),
-                                          imageJPEG: nil)   // 회상은 과거 → 현재 프레임 불필요
-                            // 2) 목적지 발화면 목표 설정 (표지판 교차검증)
+                                          imageJPEG: nil)
+                            // 3) 목적지 발화면 목표 설정 (표지판 교차검증)
                             } else if let goal = Pipeline.extractGoal(from: question) {
                                 pipeline.setGoal(spoken: goal.spoken,
                                                  keywords: goal.keywords)
@@ -174,7 +199,7 @@ struct ContentView: View {
                                 SpeechOut.shared.say(
                                     "Looking for the \(goal.spoken). "
                                     + "I'll tell you when I see a sign.", priority: 1)
-                            // 3) 그 외 현재 장면 Q&A
+                            // 4) 그 외 현재 장면 Q&A
                             } else {
                                 let scene = pipeline.snapshotJSON()
                                 let jpeg = pipeline.frameJPEG()

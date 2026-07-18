@@ -1,6 +1,6 @@
-// LiDAR + ARKit Scene Geometry — 벽/문/창을 메쉬 분류로 인식하고 미터 거리를 반환.
-// YOLO가 못 잡는 구조물만 담당. 사람·가방 등 동적 물체는 기존 YOLO 경로 유지.
-// SegFormer 같은 2D 세그 모델 없이 NPU/LiDAR 하드웨어 경로만 사용.
+// LiDAR + ARKit Scene Geometry — 벽/문/창/바닥/갈림길.
+// 경로·갈림길 기억은 GPS가 아니라 ARKit 월드 좌표(온디바이스)를 쓴다.
+// ARWorldMap 로컬 저장으로 같은 공간을 다시 열면 재로컬라이즈 가능.
 import ARKit
 import Combine
 import CoreVideo
@@ -10,40 +10,117 @@ import UIKit
 
 struct StructureHit: Equatable {
     let label: String   // wall | door | window | floor | fork
-    let meters: Double  // 장애물=최근접 / floor·fork=바닥이 이어지는 거리
-    let pos: String     // left | center | right | both(fork)
+    let meters: Double
+    let pos: String     // left | center | right | both
+}
+
+/// 한 틱의 구조물 스캔 + 카메라 포즈 (경로/갈림길 웨이포인트용).
+struct StructureUpdate {
+    let hits: [StructureHit]
+    let cameraPosition: SIMD3<Float>   // 월드 좌표
+    let cameraForward: SIMD3<Float>    // 수평 전방 단위벡터
 }
 
 final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
-    /// iPhone 12 Pro+ 등 scene reconstruction + classification 지원 여부.
     static var isSupported: Bool {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
     }
 
     let session = ARSession()
     @Published var hasSceneMesh = false
-    var onFrame: ((CVPixelBuffer, CVPixelBuffer?) -> Void)?
-    var onStructures: (([StructureHit]) -> Void)?
+    @Published var mapStatus = ""          // WorldMap 저장/로드 상태
+    /// (영상, 깊이, 카메라 월드 위치, 수평 전방)
+    var onFrame: ((CVPixelBuffer, CVPixelBuffer?, SIMD3<Float>, SIMD3<Float>) -> Void)?
+    var onStructures: ((StructureUpdate) -> Void)?
 
     private let queue = DispatchQueue(label: "ar.camera")
     private var lastStructureAt = Date.distantPast
     private static let structurePeriod: TimeInterval = 0.25
-    /// 화면 가로 3등분 — 벽/문/창은 중앙만. 바닥은 좌·중·우(갈림길).
+
     private static let screenCenterMinX: CGFloat = 1.0 / 3.0
     private static let screenCenterMaxX: CGFloat = 2.0 / 3.0
-    private static let screenCenterMinY: CGFloat = 0.15
-    private static let screenCenterMaxY: CGFloat = 0.85
-    /// 측면 통로: 카메라 좌표 |x|가 이 이상이어야 "옆으로 열린 바닥"
-    /// (직진 복도 바닥이 화면 좌우에 보이는 것과 구분).
-    private static let sideBranchLateralM: Double = 0.65
-    private static let sideBranchMinDepthM: Double = 1.2
-    private static let sideBranchMaxDepthM: Double = 4.0
-    /// 장애물 클래스 (seat/table은 YOLO와 중복 → 제외).
+    private static let screenCenterMinY: CGFloat = 0.20
+    private static let screenCenterMaxY: CGFloat = 0.80
+
+    /// 측면 통로: 옆으로 충분히 벌어진 바닥 + 샘플 수 + 연속 프레임.
+    private static let sideBranchLateralM: Double = 0.90
+    private static let sideBranchMinDepthM: Double = 1.4
+    private static let sideBranchMaxDepthM: Double = 3.5
+    private static let sideMinSamples = 5
+    private static let forkConfirmStreak = 3          // ~0.75초 유지돼야 확정
+    /// 넓은 홀 오탐 방지: 좌우가 둘 다 열려 있고 전방 바닥이 너무 멀면 갈림길 아님.
+    private static let openRoomCenterMinM: Double = 3.8
+
     private static let obstacleClasses: Set<ARMeshClassification> = [.wall, .door, .window]
     private static let walkClasses: Set<ARMeshClassification> = [.floor]
 
-    func start() {
+    private var leftStreak = 0
+    private var rightStreak = 0
+
+    private static var mapURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("visionassist_world.map")
+    }
+
+    func start(withSavedMap: Bool = false) {
         guard Self.isSupported else { return }
+        queue.async {
+            let config = self.makeConfig()
+            if withSavedMap, let map = self.loadMapFromDisk() {
+                config.initialWorldMap = map
+                DispatchQueue.main.async { self.mapStatus = "map: relocalizing…" }
+            }
+            self.session.delegate = self
+            self.session.delegateQueue = self.queue
+            self.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            DispatchQueue.main.async { self.hasSceneMesh = true }
+        }
+    }
+
+    func pause() { session.pause() }
+
+    /// 현재 공간 특징점+앵커를 Documents에 저장 (완전 온디바이스, 인터넷 불필요).
+    func saveWorldMap() {
+        session.getCurrentWorldMap { [weak self] map, error in
+            guard let self else { return }
+            if let error {
+                DispatchQueue.main.async { self.mapStatus = "map save failed: \(error.localizedDescription)" }
+                return
+            }
+            guard let map else {
+                DispatchQueue.main.async { self.mapStatus = "map save failed: empty" }
+                return
+            }
+            do {
+                let data = try NSKeyedArchiver.archivedData(withRootObject: map,
+                                                            requiringSecureCoding: true)
+                try data.write(to: Self.mapURL, options: .atomic)
+                DispatchQueue.main.async {
+                    self.mapStatus = "map saved (\(data.count / 1024)KB)"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.mapStatus = "map save failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// 저장된 맵으로 세션 재시작 → 같은 공간이면 재로컬라이즈.
+    func loadWorldMap() {
+        queue.async {
+            guard let map = self.loadMapFromDisk() else {
+                DispatchQueue.main.async { self.mapStatus = "no saved map" }
+                return
+            }
+            let config = self.makeConfig()
+            config.initialWorldMap = map
+            self.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            DispatchQueue.main.async { self.mapStatus = "map loaded — look around to relocalize" }
+        }
+    }
+
+    private func makeConfig() -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
         config.sceneReconstruction = .meshWithClassification
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
@@ -52,16 +129,12 @@ final class ARCameraManager: NSObject, ObservableObject, @unchecked Sendable {
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             config.frameSemantics.insert(.smoothedSceneDepth)
         }
-        session.delegate = self
-        session.delegateQueue = queue
-        queue.async {
-            self.session.run(config, options: [.resetTracking, .removeExistingAnchors])
-            DispatchQueue.main.async { self.hasSceneMesh = true }
-        }
+        return config
     }
 
-    func pause() {
-        session.pause()
+    private func loadMapFromDisk() -> ARWorldMap? {
+        guard let data = try? Data(contentsOf: Self.mapURL) else { return nil }
+        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
     }
 }
 
@@ -69,20 +142,47 @@ extension ARCameraManager: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let pixel = frame.capturedImage
         let depth = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
-        onFrame?(pixel, depth)
+        let (position, forward) = Self.pose(from: frame.camera.transform)
+        onFrame?(pixel, depth, position, forward)
 
         let now = Date()
         guard now.timeIntervalSince(lastStructureAt) >= Self.structurePeriod else { return }
         lastStructureAt = now
-        let hits = Self.scanStructures(frame: frame)
-        if !hits.isEmpty { onStructures?(hits) }
+
+        let hits = scanStructures(frame: frame)
+        onStructures?(StructureUpdate(hits: hits, cameraPosition: position,
+                                      cameraForward: forward))
+    }
+
+    static func pose(from cam: simd_float4x4) -> (SIMD3<Float>, SIMD3<Float>) {
+        let position = SIMD3<Float>(cam.columns.3.x, cam.columns.3.y, cam.columns.3.z)
+        var forward = -SIMD3<Float>(cam.columns.2.x, 0, cam.columns.2.z)
+        let flen = simd_length(forward)
+        if flen > 1e-4 { forward /= flen } else { forward = SIMD3(0, 0, -1) }
+        return (position, forward)
+    }
+
+    func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+        DispatchQueue.main.async {
+            switch camera.trackingState {
+            case .normal:
+                if self.mapStatus.contains("relocaliz") || self.mapStatus.contains("loaded") {
+                    self.mapStatus = "map: tracking OK"
+                }
+            case .limited(let reason):
+                self.mapStatus = "tracking limited: \(reason)"
+            case .notAvailable:
+                self.mapStatus = "tracking unavailable"
+            @unknown default: break
+            }
+        }
     }
 }
 
-// MARK: - Mesh → 정면 구조물
+// MARK: - Mesh 스캔
 
 private extension ARCameraManager {
-    static func scanStructures(frame: ARFrame) -> [StructureHit] {
+    func scanStructures(frame: ARFrame) -> [StructureHit] {
         let meshes = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshes.isEmpty else { return [] }
 
@@ -91,10 +191,9 @@ private extension ARCameraManager {
         let orientation = UIInterfaceOrientation.portrait
 
         var bestObstacle: [String: StructureHit] = [:]
-        // 바닥: 밴드별 최원 거리 (center=직진 / left·right=옆으로 열린 통로)
         var floorCenterM: Double?
-        var floorLeftM: Double?
-        var floorRightM: Double?
+        var leftDepthSum = 0.0, leftCount = 0
+        var rightDepthSum = 0.0, rightCount = 0
 
         for anchor in meshes {
             let geometry = anchor.geometry
@@ -103,13 +202,13 @@ private extension ARCameraManager {
             var faceIndex = 0
             while faceIndex < faceCount {
                 defer { faceIndex += step }
-                let cls = classificationOf(faceIndex: faceIndex, geometry: geometry)
-                let isObstacle = obstacleClasses.contains(cls)
-                let isFloor = walkClasses.contains(cls)
+                let cls = Self.classificationOf(faceIndex: faceIndex, geometry: geometry)
+                let isObstacle = Self.obstacleClasses.contains(cls)
+                let isFloor = Self.walkClasses.contains(cls)
                 guard isObstacle || isFloor else { continue }
-                guard let centerWorld = faceCenter(faceIndex: faceIndex,
-                                                   geometry: geometry,
-                                                   transform: anchor.transform)
+                guard let centerWorld = Self.faceCenter(faceIndex: faceIndex,
+                                                        geometry: geometry,
+                                                        transform: anchor.transform)
                 else { continue }
 
                 let p4 = worldToCamera * SIMD4<Float>(centerWorld, 1)
@@ -121,79 +220,89 @@ private extension ARCameraManager {
                     centerWorld, orientation: orientation, viewportSize: viewport)
                 let nx = projected.x / viewport.width
                 let ny = projected.y / viewport.height
-                guard ny >= screenCenterMinY, ny <= screenCenterMaxY else { continue }
+                guard ny >= Self.screenCenterMinY, ny <= Self.screenCenterMaxY else { continue }
 
                 let band: String
-                if nx < screenCenterMinX { band = "left" }
-                else if nx > screenCenterMaxX { band = "right" }
+                if nx < Self.screenCenterMinX { band = "left" }
+                else if nx > Self.screenCenterMaxX { band = "right" }
                 else { band = "center" }
 
                 if isFloor {
-                    if let nWorld = faceNormalWorld(faceIndex: faceIndex, geometry: geometry,
-                                                    anchor: anchor.transform),
+                    if let nWorld = Self.faceNormalWorld(faceIndex: faceIndex, geometry: geometry,
+                                                         anchor: anchor.transform),
                        abs(nWorld.y) < 0.65 {
                         continue
                     }
                     if band == "center" {
-                        if floorCenterM == nil || depth > floorCenterM! {
-                            floorCenterM = depth
-                        }
+                        if floorCenterM == nil || depth > floorCenterM! { floorCenterM = depth }
                     } else {
-                        // 측면 통로: 화면 좌/우 + 실제 옆으로 벌어진 바닥만
-                        // (직진 복도 바닥이 프레임 좌우에 비치는 것 제외)
                         let lateral = abs(Double(p4.x))
-                        guard lateral >= sideBranchLateralM,
-                              depth >= sideBranchMinDepthM,
-                              depth <= sideBranchMaxDepthM else { continue }
+                        guard lateral >= Self.sideBranchLateralM,
+                              depth >= Self.sideBranchMinDepthM,
+                              depth <= Self.sideBranchMaxDepthM else { continue }
                         if band == "left" {
-                            if floorLeftM == nil || depth > floorLeftM! { floorLeftM = depth }
+                            leftDepthSum += depth; leftCount += 1
                         } else {
-                            if floorRightM == nil || depth > floorRightM! { floorRightM = depth }
+                            rightDepthSum += depth; rightCount += 1
                         }
                     }
                     continue
                 }
 
-                // 벽/문/창: 중앙 밴드만
                 guard band == "center" else { continue }
-                if let nCam = faceNormalCamera(faceIndex: faceIndex, geometry: geometry,
-                                               anchor: anchor.transform,
-                                               worldToCamera: worldToCamera),
+                if let nCam = Self.faceNormalCamera(faceIndex: faceIndex, geometry: geometry,
+                                                    anchor: anchor.transform,
+                                                    worldToCamera: worldToCamera),
                    abs(nCam.z) < abs(nCam.x) {
                     continue
                 }
-                let label = labelName(cls)
+                let label = Self.labelName(cls)
                 let hit = StructureHit(label: label, meters: depth, pos: "center")
                 if let prev = bestObstacle[label], prev.meters <= hit.meters { continue }
                 bestObstacle[label] = hit
             }
         }
 
+        var leftM = leftCount > 0 ? leftDepthSum / Double(leftCount) : nil
+        var rightM = rightCount > 0 ? rightDepthSum / Double(rightCount) : nil
+        // 전방 복도 깊이와 비슷한 측면만 남김 (스캔 순서와 무관하게 최종 필터)
+        if let c = floorCenterM {
+            let ref = min(c, 3.0)
+            if let m = leftM, abs(m - ref) > 1.6 { leftM = nil; leftCount = 0 }
+            if let m = rightM, abs(m - ref) > 1.6 { rightM = nil; rightCount = 0 }
+        }
+
+        let rawLeft = leftCount >= Self.sideMinSamples && leftM != nil
+        let rawRight = rightCount >= Self.sideMinSamples && rightM != nil
+        leftStreak = rawLeft ? leftStreak + 1 : 0
+        rightStreak = rawRight ? rightStreak + 1 : 0
+        let leftOK = leftStreak >= Self.forkConfirmStreak
+        let rightOK = rightStreak >= Self.forkConfirmStreak
+
         var out = Array(bestObstacle.values)
         if let m = floorCenterM {
             out.append(StructureHit(label: "floor", meters: m, pos: "center"))
         }
-        if let m = floorLeftM {
+        if leftOK, let m = leftM {
             out.append(StructureHit(label: "floor", meters: m, pos: "left"))
         }
-        if let m = floorRightM {
+        if rightOK, let m = rightM {
             out.append(StructureHit(label: "floor", meters: m, pos: "right"))
         }
-        // 갈림길: 좌·우 측면 바닥이 동시에, 또는 한쪽에만 열린 통로
-        let left = floorLeftM != nil
-        let right = floorRightM != nil
-        if left || right {
+
+        // 갈림길: 전방 바닥(복도 맥락) 있을 때만. 넓은 홀(좌우+먼 전방) 제외.
+        let hasCorridor = (floorCenterM ?? 0) >= 1.2
+        let openRoom = leftOK && rightOK && (floorCenterM ?? 0) >= Self.openRoomCenterMinM
+        if hasCorridor && !openRoom && (leftOK || rightOK) {
             let pos: String
             let meters: Double
-            if left && right {
+            if leftOK && rightOK {
                 pos = "both"
-                meters = min(floorLeftM!, floorRightM!)
-            } else if left {
-                pos = "left"
-                meters = floorLeftM!
+                meters = min(leftM!, rightM!)
+            } else if leftOK {
+                pos = "left"; meters = leftM!
             } else {
-                pos = "right"
-                meters = floorRightM!
+                pos = "right"; meters = rightM!
             }
             out.append(StructureHit(label: "fork", meters: meters, pos: pos))
         }
