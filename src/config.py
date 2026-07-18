@@ -14,8 +14,15 @@ TRACK_LABELS = {"person", "chair", "bicycle", "car", "dog", "backpack",
                 "bus", "truck", "motorcycle", "traffic light", "stop sign"}
 
 # 거리 임계값: bbox_h / frame_h. 리허설에서 실측 캘리브레이션.
-NEAR_THRESH = {"person": 0.60, "chair": 0.45, "default": 0.50}
-MED_THRESH = {"person": 0.30, "chair": 0.25, "default": 0.28}
+# 대형 물체(테이블/소파/차량)는 멀어도 bbox가 커서 임계값을 높게 잡는다.
+NEAR_THRESH = {"person": 0.60, "chair": 0.50, "bicycle": 0.55,
+               "dining table": 0.80, "couch": 0.80, "bench": 0.70,
+               "car": 0.70, "bus": 0.85, "truck": 0.85, "default": 0.55}
+MED_THRESH = {"person": 0.30, "chair": 0.28,
+              "dining table": 0.50, "couch": 0.50, "car": 0.40,
+              "bus": 0.55, "truck": 0.55, "default": 0.30}
+NEAR_BOTTOM_MIN = 0.75               # near 판정 추가 조건: bbox 하단이 프레임 하단 25% 안
+                                     # (멀리 있는 대형 물체는 화면 중간에 떠 있음)
 CLOSING_RATE = 0.15                  # bbox_h_ratio 초당 증가율 → approaching
 GONE_AFTER_MISSES = 5                # 연속 미검출 프레임 수 → 객체 제거
 

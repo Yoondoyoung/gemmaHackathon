@@ -1,7 +1,10 @@
 """YOLO 탐지 루프 (~10+ FPS): 프레임 → 트래킹 → SceneState → 룰베이스 경고."""
 import time
 
+import cv2
+
 from src import config
+from src.scene_state import _dist_of
 
 
 def load_model():
@@ -36,10 +39,17 @@ def run_loop(camera, scene, alert_engine, speaker, stop_flag, shared):
             cx = (x1 + x2) / 2
             pos = "left" if cx < w / 3 else ("center" if cx < 2 * w / 3 else "right")
             detections.append({"track_id": int(box.id), "label": label,
-                               "pos": pos, "bbox_h_ratio": (y2 - y1) / h})
+                               "pos": pos, "bbox_h_ratio": (y2 - y1) / h,
+                               "bottom": y2 / h,
+                               "_xy": (int(x1), int(y1))})
         for sentence in alert_engine.process(scene.update_objects(detections)):
             speaker.say(sentence, priority=0)
-        shared["overlay"] = res.plot()
+        overlay = res.plot()
+        for d in detections:      # 거리 판정 표시 (리허설 캘리브레이션용)
+            tag = f"{_dist_of(d['label'], d['bbox_h_ratio'], d['bottom'])} h={d['bbox_h_ratio']:.2f}"
+            cv2.putText(overlay, tag, (d["_xy"][0], max(d["_xy"][1] - 6, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+        shared["overlay"] = overlay
         shared["fps"] = 1.0 / max(time.time() - t0, 1e-6)
 
 

@@ -20,8 +20,11 @@ class Event:
     track_id: int
 
 
-def _dist_of(label: str, h_ratio: float) -> str:
-    if h_ratio >= config.NEAR_THRESH.get(label, config.NEAR_THRESH["default"]):
+def _dist_of(label: str, h_ratio: float, bottom: float = 1.0) -> str:
+    """bottom = bbox 하단 y / 프레임 높이. 가까운 물체는 바닥 접점이 화면 하단에 닿고,
+    멀리 있는 대형 물체는 화면 중간에 떠 있다 → near는 크기 + 바닥 접점 둘 다 요구."""
+    if h_ratio >= config.NEAR_THRESH.get(label, config.NEAR_THRESH["default"]) \
+            and bottom >= config.NEAR_BOTTOM_MIN:
         return "near"
     if h_ratio >= config.MED_THRESH.get(label, config.MED_THRESH["default"]):
         return "medium"
@@ -51,7 +54,7 @@ class SceneState:
                 old = next(((t, r) for t, r in hist if now - t >= 0.8), None)
                 closing = old is not None and \
                     (d["bbox_h_ratio"] - old[1]) / (now - old[0]) > config.CLOSING_RATE
-                dist = _dist_of(d["label"], d["bbox_h_ratio"])
+                dist = _dist_of(d["label"], d["bbox_h_ratio"], d.get("bottom", 1.0))
                 prev = self._objects.get(tid)
                 if prev is None:
                     status = "new"
