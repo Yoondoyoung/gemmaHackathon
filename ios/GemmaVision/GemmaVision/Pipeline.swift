@@ -19,7 +19,7 @@ enum Config {
         "potted plant", "refrigerator", "oven", "microwave", "sink",
         "backpack", "handbag", "suitcase", "umbrella", "cell phone",
         "laptop", "keyboard", "mouse", "remote", "book", "bottle", "cup",
-        "skateboard", "clock", "vase"]
+        "skateboard", "clock", "vase", "backpack"]
     static let nearThresh: [String: CGFloat] = [
         "person": 0.60, "chair": 0.50, "bicycle": 0.55, "dining table": 0.80,
         "couch": 0.80, "bench": 0.70, "bed": 0.85, "car": 0.70, "bus": 0.85,
@@ -27,7 +27,7 @@ enum Config {
         "oven": 0.55, "sink": 0.50, "toilet": 0.50, "laptop": 0.35,
         "bottle": 0.30, "cup": 0.25, "cell phone": 0.20, "book": 0.30,
         "clock": 0.30, "vase": 0.40, "umbrella": 0.55, "skateboard": 0.35,
-        "fire hydrant": 0.45, "parking meter": 0.45]
+        "fire hydrant": 0.45, "parking meter": 0.45, "backpack": 0.45]
     static let defaultNear: CGFloat = 0.55
     static let nearBottomMaxY: CGFloat = 0.25    // Vision 좌표(원점 좌하단): minY < 0.25 = 바닥 접점
     static let nearMeters: Double = 2.5          // LiDAR 실측 기준 (Mac판 depth 튜닝값)
@@ -39,6 +39,10 @@ enum Config {
     /// 바닥이 이 거리 이상 이어지고 앞에 막힘이 없으면 "path clear" 안내
     static let pathClearMinFloorM: Double = 1.5
     static let pathClearCooldown: TimeInterval = 12
+    /// 갈림길 선제 발화 여부 — 바닥 메쉬 기반 감지는 방 입구/가구 틈/넓은 복도를
+    /// 오탐해 정확도가 낮음. 오보는 시각장애 사용자를 벽으로 안내하므로 Push는 끔.
+    /// (Gemma 스냅샷의 fork 힌트는 유지 — 질문 시 이미지와 교차검증되는 Pull 경로)
+    static let announceForks = false
     /// 갈림길/측면 통로 안내 (같은 형태 재알림 쿨다운)
     static let forkCooldown: TimeInterval = 18
     /// 저장된 갈림길 웨이포인트에 이 거리 안으로 들어오면 "지나침" 안내
@@ -295,7 +299,7 @@ final class Pipeline: ObservableObject {
         }
 
         // 2) 갈림길 — 확정된 fork가 새로 나타날 때만 + 월드 좌표에 웨이포인트 저장
-        if let fork = hits.first(where: { $0.label == "fork" }) {
+        if Config.announceForks, let fork = hits.first(where: { $0.label == "fork" }) {
             let prev = lastForkPos
             lastForkPos = fork.pos
             let appeared = prev != fork.pos
@@ -378,6 +382,7 @@ final class Pipeline: ObservableObject {
     /// 예전에 찍은 갈림길 근처를 지나가면 한 번 안내. true면 이 틱에서 발화함.
     @discardableResult
     private func announceForkPassIfNeeded(at camera: SIMD3<Float>) -> Bool {
+        guard Config.announceForks else { return false }
         guard !SpeechOut.shared.suppressingWarnings else { return false }
         let now = Date()
         if now.timeIntervalSince(lastAlertByLabel["fork_pass"] ?? .distantPast)
