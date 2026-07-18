@@ -58,11 +58,20 @@ enum Config {
         "where is my", "where's my", "where is the", "where's the",
         "find my", "find the", "take me back", "go back to", "guide me to",
         "how do i get back", "lead me to"]
-    static let confMin: Float = 0.4
+    static let confMin: Float = 0.45              // nano 기본 — 낮으면 후반 오탐↑
+    /// 클래스별 conf (미지정은 confMin). backpack는 낮추고, 의자/병 등 오탐 클래스는 올림.
+    static let confByLabel: [String: Float] = [
+        "backpack": 0.28, "handbag": 0.30, "suitcase": 0.32,
+        "cell phone": 0.35, "laptop": 0.35, "bottle": 0.55, "cup": 0.55,
+        "book": 0.55, "remote": 0.55, "vase": 0.55, "clock": 0.50,
+        "chair": 0.50, "potted plant": 0.50, "mouse": 0.55, "keyboard": 0.50]
+    static let yoloMaxDets = 12                   // conf 상위만 — 패딩/잡음 슬롯 차단
+    static let yoloMinBoxArea: CGFloat = 0.004    // 화면 대비 너무 작은 박스 무시
     static let alertCooldown: TimeInterval = 5    // YOLO 라벨별 (ID churn 대응)
     static let alertGlobalGap: TimeInterval = 2
     static let ocrPeriod: TimeInterval = 2.0      // 16 Pro 열/메모리 여유 (이전이 1.2)
-    static let yoloMinInterval: TimeInterval = 1.0 / 30.0  // YOLO ≤30fps
+    /// 30fps는 발열·드랍으로 후반 품질 저하. 데모 3분이면 15fps면 충분.
+    static let yoloMinInterval: TimeInterval = 1.0 / 15.0
     static let ocrMinConfidence: Float = 0.4      // 빛번짐으로 저하된 읽기도 살림 (nav/목표 필터가 잡음 차단)
     static let navWords: Set<String> = [
         "exit", "restroom", "toilet", "toilets", "wc", "men", "women",
@@ -449,20 +458,23 @@ final class Pipeline: ObservableObject {
         out.reserveCapacity(min(n, 64))
         for i in 0..<n {
             let conf = array[[0, i, 4] as [NSNumber]].floatValue
-            guard conf > Config.confMin else { continue }
             let cls = Int(array[[0, i, 5] as [NSNumber]].floatValue)
             guard cls >= 0, cls < Config.cocoNames.count else { continue }
             let label = Config.cocoNames[cls]
             guard Config.trackLabels.contains(label) else { continue }
+            let need = Config.confByLabel[label] ?? Config.confMin
+            guard conf >= need else { continue }
             let x1 = CGFloat(array[[0, i, 0] as [NSNumber]].floatValue) / imgsz
             let y1 = CGFloat(array[[0, i, 1] as [NSNumber]].floatValue) / imgsz
             let x2 = CGFloat(array[[0, i, 2] as [NSNumber]].floatValue) / imgsz
             let y2 = CGFloat(array[[0, i, 3] as [NSNumber]].floatValue) / imgsz
             // YOLO 좌상단 → Vision 좌하단
             let box = CGRect(x: x1, y: 1 - y2, width: max(0, x2 - x1), height: max(0, y2 - y1))
+            guard box.width * box.height >= Config.yoloMinBoxArea else { continue }
             out.append(Det(label: label, confidence: conf, box: box))
         }
-        return out
+        // conf 상위만 — 300슬롯 패딩/저신뢰 잔여가 후반에 쌓여 보이는 오탐 완화
+        return Array(out.sorted { $0.confidence > $1.confidence }.prefix(Config.yoloMaxDets))
     }
 
     // MARK: - 장애물 경고 (룰베이스 — LLM 금지 원칙 유지)
@@ -496,10 +508,11 @@ final class Pipeline: ObservableObject {
             // 어느 쪽(좌/중/우)이든 '지나친 것'으로 기록 (경고는 여전히 near+center만).
             if dist != "far" {
                 logObjectPassed(det.label, pos: pos)
-                // LiDAR 깊이 + AR 포즈가 있으면 월드 좌표에 찍어 "다시 가기"에 사용
-                if let m = meters {
-                    rememberObject(label: det.label, screenPos: pos, depthM: m)
-                }
+                // 월드 좌표 기억 — LiDAR 우선, 없으면 박스 높이로 대략 추정
+                // (깊이 없으면 "Where's my backpack?"가 항상 실패하던 구멍)
+                let depthM = meters ?? min(Config.objectMemoryMaxDepthM,
+                    max(Config.objectMemoryMinDepthM, 0.55 / max(0.05, Double(box.height))))
+                rememberObject(label: det.label, screenPos: pos, depthM: depthM)
             }
             guard near, pos == "center" else { continue }
             // Q&A 답변 재생 중엔 경고를 내지 않는다 (쿨다운도 소진 안 함 —
